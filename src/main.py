@@ -1,16 +1,8 @@
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication
 
-# 01. Main window class (OOP inheritance)
-class TermiPDFWindow(QMainWindow):
-    def __init__(self):
-        super().__init__() # Call parent class QMainWindows __init__
-        
-        # Set window Title
-        self.setWindowTitle("TermiPDF - The smart PDF Editor")
-        
-        # Windows size and position: setGeometry(x, y, width, height)
-        self.setGeometry(100, 100, 800, 600)
+# import window class from ui folder
+from ui.main_window import TemriPDFWindow
         
 # 02. Main function (App start from here)
 def main():
@@ -18,7 +10,7 @@ def main():
     app = QApplication(sys.argv) # Terminal command control likes: for run main.py --> python src/main.py 
     
     # Create class object 
-    window = TermiPDFWindow()
+    window = TemriPDFWindow()
     
     # Show window to screen
     window.show()
