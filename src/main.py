@@ -2,7 +2,7 @@ import sys
 from PyQt6.QtWidgets import QApplication
 
 # import window class from ui folder
-from ui.main_window import TemriPDFWindow
+from ui.main_window import TermiPDFWindow
         
 # 02. Main function (App start from here)
 def main():
@@ -10,7 +10,7 @@ def main():
     app = QApplication(sys.argv) # Terminal command control likes: for run main.py --> python src/main.py 
     
     # Create class object 
-    window = TemriPDFWindow()
+    window = TermiPDFWindow()
     
     # Show window to screen
     window.show()

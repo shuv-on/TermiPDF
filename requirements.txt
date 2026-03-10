@@ -1,0 +1,2 @@
+Run code --> python src/main.py
+Activate .venv --> source .venv/bin/activate
