@@ -1,4 +1,6 @@
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QPushButton, QTextEdit, QLineEdit
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QTextEdit, QLineEdit, QLabel, QScrollArea) 
 from core.command_engine import CommandEngine
 
 # Main window class
@@ -10,7 +12,7 @@ class TermiPDFWindow(QMainWindow):
         self.setWindowTitle("TermiPDF - The Smart PDF Editor")
         
         # Window size and position: setGeometry(x, y, width, height)
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 1000, 600)
         
         # create commandEngine object
         self.engine = CommandEngine()
@@ -18,9 +20,25 @@ class TermiPDFWindow(QMainWindow):
         # 01. Central widget & Layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout()
+        main_layout = QHBoxLayout()
         
-        # 02. Terminal Output Area
+        # ======================================
+        # 02. Left Panle Layout: PDF Viewer
+        # ======================================
+        self.pdf_viewer_label = QLabel("No PDF Loaded. Use termianl to open a file.")
+        self.pdf_viewer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pdf_viewer_label.setStyleSheet("background-color: #2b2b2b; color: #888888; font-size: 16px;")
+        
+        # Scrolling area for mouse scroll
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.pdf_viewer_label)
+        self.scroll_area.setWidgetResizable(True)
+        
+        # =============================================
+        # 03. Right Panel Layout: Terminal Output Area
+        # =============================================
+        right_panel_layout = QVBoxLayout()
+        
         self.terminal_output = QTextEdit()
         self.terminal_output.setReadOnly(True)
         # Terminal style
@@ -28,15 +46,22 @@ class TermiPDFWindow(QMainWindow):
         self.terminal_output.append(">>> TermiPDF OS v1.0 Initialized...")
         self.terminal_output.append(">>> Type 'help' to see available commands.\n")
         
-        # 03. Termianl Input Box
+        # Termianl Input Box
         self.command_input = QLineEdit()
         self.command_input.setPlaceholderText("Enter your command here...(e.g., help)")
         self.command_input.setStyleSheet("font-family: Consolas; font-size: 14px; padding: 5px")
         
-        # 04. Set Layout Widget
-        layout.addWidget(self.terminal_output)
-        layout.addWidget(self.command_input)
-        central_widget.setLayout(layout)
+        
+        right_panel_layout.addWidget(self.terminal_output)
+        right_panel_layout.addWidget(self.command_input)
+        
+        # ===========================
+        # 04. Assemble Panels
+        # ===========================
+        main_layout.addWidget(self.scroll_area, stretch=6)
+        main_layout.addLayout(right_panel_layout, stretch=4)
+        
+        central_widget.setLayout(main_layout)
         
         # ===========================================
         # 05. Signal and Slots
