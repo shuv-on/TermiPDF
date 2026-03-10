@@ -1,4 +1,5 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QPushButton, QTextEdit, QLineEdit
+from core.command_engine import CommandEngine
 
 # Main window class
 class TermiPDFWindow(QMainWindow):
@@ -10,6 +11,9 @@ class TermiPDFWindow(QMainWindow):
         
         # Window size and position: setGeometry(x, y, width, height)
         self.setGeometry(100, 100, 800, 600)
+        
+        # create commandEngine object
+        self.engine = CommandEngine()
         
         # 01. Central widget & Layout
         central_widget = QWidget()
@@ -51,18 +55,18 @@ class TermiPDFWindow(QMainWindow):
         # show user command to screen
         self.terminal_output.append(f"<span style='color: white;'>$ {user_text} </span>")
         
+        # Command processing
+        action, response = self.engine.execute(user_text)
+        
         # if else control flow for command
-        if user_text.lower() == "help":
-            self.terminal_output.append(">>> Available Commands: ")
-            self.terminal_output.append("       - <b>help</b>   : Show this message")
-            self.terminal_output.append("       - <b>clear</b>  : Clear the temrinal")
-            self.terminal_output.append("       - <b>exit</b>   : Close the application")
-        elif user_text.lower() == "clear":
-            self.terminal_output.clear() # clear screen
-            self.terminal_output.append(">>> TermiPDF OS v1.0 Initialized...")
-        elif user_text.lower() == "exit":
-            self.close() # app close
-        else:
-            self.terminal_output.append(f"<span style = 'color: red;' > >>>Error: Command '{user_text}' not found</span>")
+        if action == "print":
+            self.terminal_output.append(response)
+        elif action == "clear":
+            self.terminal_output.clear()
+            self.terminal_output.append(response)
+        elif action == "exit":
+            self.close()
+        elif action == "error":
+            self.terminal_output.append(response)
         # Empty command box
         self.command_input.clear()
