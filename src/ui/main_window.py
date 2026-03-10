@@ -53,7 +53,7 @@ class TermiPDFWindow(QMainWindow):
         
         
         right_panel_layout.addWidget(self.terminal_output)
-        right_panel_layout.addWidget(self.command_input)
+        right_panel_layout.addWidget(self.command_input) 
         
         # ===========================
         # 04. Assemble Panels
