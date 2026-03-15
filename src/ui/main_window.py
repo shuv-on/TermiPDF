@@ -1,6 +1,7 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QTextEdit, QLineEdit, QLabel, QScrollArea) 
+from PyQt6.QtGui import QPixmap
 from core.command_engine import CommandEngine
 
 # Main window class
@@ -93,5 +94,18 @@ class TermiPDFWindow(QMainWindow):
             self.close()
         elif action == "error":
             self.terminal_output.append(response)
+        elif action == "open":
+            # 1. Show success message
+            self.terminal_output.append(response["msg"])
+            
+            # 2. Change png to PDF
+            pixmap = QPixmap()
+            pixmap.loadFromData(response["image_bytes"])
+            
+            # 3. set pdf viewer
+            self.pdf_viewer_label.setPixmap(pixmap)
+            
+            # 4. fit with label size
+            self.pdf_viewer_label.setScaledContents(True)
         # Empty command box
         self.command_input.clear()
