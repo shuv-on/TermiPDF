@@ -28,7 +28,7 @@ class CommandEngine:
         elif cmd == "open":
             if len(cmd_parts) < 2:
                 return "error", "<span style='color: red;'>>>> Error: Please provide a filename. Example: open test.pdf</span>"
-            filename = cmd_parts[1]
+            filename = " ".join(cmd_parts[1:]).strip('"').strip("'")
             
             if not os.path.exists(filename):
                 return "error", f"<span style='color: red;'>>>> Error: File '{filename}' not found!</span>"

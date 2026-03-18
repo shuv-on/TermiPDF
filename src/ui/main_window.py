@@ -1,8 +1,8 @@
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QSplitter, QToolBar
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QTextEdit, QLineEdit, QLabel, QScrollArea) 
-from PyQt6.QtGui import QPixmap
 from core.command_engine import CommandEngine
+from ui.components.pdf_viewer_ui import PDFViewerUI
+from ui.components.terminal_ui import TerminalUI
 
 # Main window class
 class TermiPDFWindow(QMainWindow):
@@ -15,97 +15,118 @@ class TermiPDFWindow(QMainWindow):
         # Window size and position: setGeometry(x, y, width, height)
         self.setGeometry(100, 100, 1000, 600)
         
+        # Drags & Drops Permission
+        self.setAcceptDrops(True)
+        
         # create commandEngine object
         self.engine = CommandEngine()
-        
+
+        # ==========================================
+        # ToolBar (Toggle Terminal Button)
+        # ==========================================
+        toolbar = self.addToolBar("Main Toolbar")
+        toolbar.setMovable(False)
+        self.toggle_term_action = toolbar.addAction("💻 Toggle Terminal")
+        self.toggle_term_action.triggered.connect(self.toggle_terminal)
+
+        # ==========================================
         # 01. Central widget & Layout
+        # ==========================================
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # ======================================
-        # 02. Left Panle Layout: PDF Viewer
+        # 02. Left Panel & 03. Right Panel Components
         # ======================================
-        self.pdf_viewer_label = QLabel("No PDF Loaded. Use termianl to open a file.")
-        self.pdf_viewer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pdf_viewer_label.setStyleSheet("background-color: #2b2b2b; color: #888888; font-size: 16px;")
-        
-        # Scrolling area for mouse scroll
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidget(self.pdf_viewer_label)
-        self.scroll_area.setWidgetResizable(True)
-        
-        # =============================================
-        # 03. Right Panel Layout: Terminal Output Area
-        # =============================================
-        right_panel_layout = QVBoxLayout()
-        
-        self.terminal_output = QTextEdit()
-        self.terminal_output.setReadOnly(True)
-        # Terminal style
-        self.terminal_output.setStyleSheet("background-color: #1e1e1e; color: #00ff00; font-family: Consolas; font-size: 14px;")
-        self.terminal_output.append(">>> TermiPDF OS v1.0 Initialized...")
-        self.terminal_output.append(">>> Type 'help' to see available commands.\n")
-        
-        # Termianl Input Box
-        self.command_input = QLineEdit()
-        self.command_input.setPlaceholderText("Enter your command here...(e.g., help)")
-        self.command_input.setStyleSheet("font-family: Consolas; font-size: 14px; padding: 5px")
-        
-        
-        right_panel_layout.addWidget(self.terminal_output)
-        right_panel_layout.addWidget(self.command_input) 
-        
+        self.pdf_viewer = PDFViewerUI()
+        self.terminal = TerminalUI()
+
         # ===========================
         # 04. Assemble Panels
         # ===========================
-        main_layout.addWidget(self.scroll_area, stretch=6)
-        main_layout.addLayout(right_panel_layout, stretch=4)
-        
+        self.splitter.addWidget(self.pdf_viewer)
+        self.splitter.addWidget(self.terminal)
+        self.splitter.setSizes([600, 400])
+
+        main_layout.addWidget(self.splitter)
         central_widget.setLayout(main_layout)
-        
+
         # ===========================================
         # 05. Signal and Slots
         # ===========================================
         # if user write command and press enter then process_command method will run
-        self.command_input.returnPressed.connect(self.process_command)
-        
-        
+        self.terminal.command_entered.connect(self.process_command)
+        # hide terminal when close button is clicked
+        self.terminal.close_requested.connect(self.terminal.hide)
+
+    def toggle_terminal(self):
+        if self.terminal.isHidden():
+            self.terminal.show()
+        else:
+            self.terminal.hide()
+
     # ===============================================
     # 06. Command Processing Engine
     # ===============================================
-    def process_command(self):
-        user_text = self.command_input.text().strip() # .strip() -> delete space left and right
-        if not user_text:
-            return # if no text input and press enter nothing to do
+    def process_command(self, user_text):
         # show user command to screen
-        self.terminal_output.append(f"<span style='color: white;'>$ {user_text} </span>")
+        self.terminal.append_output(f"<span style='color: white;'>$ {user_text} </span>")
         
         # Command processing
         action, response = self.engine.execute(user_text)
-        
+
         # if else control flow for command
         if action == "print":
-            self.terminal_output.append(response)
+            self.terminal.append_output(response)
         elif action == "clear":
-            self.terminal_output.clear()
-            self.terminal_output.append(response)
+            self.terminal.clear_output()
+            self.terminal.append_output(response)
         elif action == "exit":
             self.close()
         elif action == "error":
-            self.terminal_output.append(response)
+            self.terminal.append_output(response)
         elif action == "open":
             # 1. Show success message
-            self.terminal_output.append(response["msg"])
+            self.terminal.append_output(response["msg"])
             
             # 2. Change png to PDF
-            pixmap = QPixmap()
-            pixmap.loadFromData(response["image_bytes"])
-            
             # 3. set pdf viewer
-            self.pdf_viewer_label.setPixmap(pixmap)
-            
             # 4. fit with label size
-            self.pdf_viewer_label.setScaledContents(True)
-        # Empty command box
-        self.command_input.clear()
+            # (Note: Step 2, 3 and 4 are now handled inside pdf_viewer_ui.py)
+            self.pdf_viewer.set_image(response["image_bytes"]) 
+
+    # ===============================================
+    # 07. Drag & Drop Events
+    # ===============================================
+    def dragEnterEvent(self, event):
+        # to check drag file is .pdf or not
+        if event.mimeData().hasUrls():
+            file_url = event.mimeData().urls()[0].toLocalFile()
+            if file_url.lower().endswith('.pdf'):
+                event.accept() # if pdf give acces
+            else:
+                event.ignore() # else don't give access
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        # Mouse leave
+        file_path = event.mimeData().urls()[0].toLocalFile()
+        
+        # show opening command to terminal
+        auto_command = f'open "{file_path}"'
+        self.terminal.append_output(f"<span style='color: #00ffff;'>$ [Drag & Drop] {auto_command} </span>")
+        
+        # send command 
+        action, response = self.engine.execute(auto_command)
+        
+        # set image 
+        if action == "open":
+            self.terminal.append_output(response["msg"])
+            self.pdf_viewer.set_image(response["image_bytes"])
+        elif action == "error":
+            self.terminal.append_output(response)
