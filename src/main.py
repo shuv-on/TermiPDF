@@ -6,8 +6,8 @@ Run with:
     python src/main.py
 
 This file is intentionally minimal: it only constructs the QApplication,
-loads the QSS theme, and shows the main window. All feature logic lives
-under src/features/.
+applies the active theme, and shows the main window. All feature logic
+lives under src/features/.
 """
 from __future__ import annotations
 
@@ -22,18 +22,8 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from shared.utils.path_solver import style_path  # noqa: E402
-from main_window import TermiPDFWindow             # noqa: E402
-
-
-def _load_stylesheet(app: QApplication) -> None:
-    qss_path = style_path("modern_theme.qss")
-    try:
-        with open(qss_path, "r", encoding="utf-8") as fh:
-            app.setStyleSheet(fh.read())
-    except FileNotFoundError:
-        # Without the QSS the app still works (falls back to defaults).
-        print(f"[TermiPDF] Warning: theme file not found at {qss_path}")
+from shared.utils.theme_manager import ThemeManager  # noqa: E402
+from main_window import TermiPDFWindow               # noqa: E402
 
 
 def main() -> int:
@@ -41,8 +31,8 @@ def main() -> int:
     app.setApplicationName("TermiPDF")
     app.setOrganizationName("TermiPDF")
 
-    _load_stylesheet(app)
-
+    # Theme is applied inside TermiPDFWindow so it can react to toggle
+    # events from the toolbar. We just construct the window here.
     window = TermiPDFWindow()
     window.show()
 

@@ -1,5 +1,5 @@
 """
-text_editor.py — Insert Unicode text into a PDF (with full Bangla support).
+text_editor.py — Insert & replace Unicode text on a PDF (with full Bangla support).
 
 Implementation notes
 --------------------
@@ -8,9 +8,9 @@ that has glyph coverage for the target script. We accept --font <path> so the
 user can point at Kalpurush.ttf, NotoSansBengali.ttf, etc. If no font is
 supplied we auto-detect the first TTF in src/shared/assets/.
 
-Bangla rendering pitfall: PyMuPDF uses HarfBuzz for shaping when given a TTF
-that has GSUB tables, so joining letters are drawn correctly. We use
-`insert_textbox` for multi-line text support and to auto-wrap.
+`whiteout_then_insert` paints a white rectangle at (x, y) then writes new
+text at the same point. This is the safe fallback for scanned PDFs that
+don't expose digital text — redaction would destroy image content.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import os
 from typing import Optional, Tuple
 
 import fitz
+from PyQt6.QtCore import QRectF
 
 from features.pdf_viewer.viewer_engine import ViewerEngine
 from shared.utils.path_solver import font_path, asset_path
@@ -160,3 +161,63 @@ class TextEditor:
             )
         except Exception as exc:
             return False, f"insert_text failed: {exc}"
+
+    # ------------------------------------------------------- replace / whiteout
+    def whiteout_then_insert(self, page: int, x: float, y: float, new_text: str,
+                              font_size: float = 12.0,
+                              color: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+                              width: float = 200.0, height: float = 18.0,
+                              viewer: Optional[object] = None) -> Tuple[bool, str]:
+        """Whiteout a small area and insert replacement text.
+
+        Used by `mode edit-text`. Scanned PDFs can't be redacted cleanly so
+        we always use whiteout + insert rather than `apply_redactions`.
+
+        Args:
+            page: 1-based page number.
+            x, y: PDF coordinates where the original text was.
+            new_text: replacement string.
+            viewer: optional PDFViewerUI to refresh after the operation.
+        """
+        if not self.viewer.is_open:
+            return False, "No PDF is open."
+        if not new_text:
+            return False, "Empty replacement text."
+        if page < 1 or page > self.viewer.page_count:
+            return False, f"Invalid page {page} (1..{self.viewer.page_count})."
+
+        page_obj = self.viewer.get_page(page - 1)
+        page_rect = page_obj.rect
+
+        # Whiteout rectangle clamped to page bounds
+        x0 = max(page_rect.x0, x)
+        y0 = max(page_rect.y0, y - height + 2)        # baseline → top
+        x1 = min(page_rect.x1, x + width)
+        y1 = min(page_rect.y1, y + 2)
+        if x1 <= x0 or y1 <= y0:
+            return False, "Edit rect is outside the page bounds."
+        wrect = fitz.Rect(x0, y0, x1, y1)
+
+        try:
+            # 1) draw a white rectangle over the area
+            shape = page_obj.new_shape()
+            shape.draw_rect(wrect)
+            shape.finish(fill=(1, 1, 1), color=(1, 1, 1), width=0.5,
+                         stroke_opacity=1, fill_opacity=1)
+            shape.commit()
+
+            # 2) insert the replacement text using the same font helpers
+            ok, sub_msg = self.add_text(
+                new_text, page, x0, y1 - 2,
+                font_size=font_size, color=color, width=width, height=height,
+            )
+            if not ok:
+                return False, f"Whiteout ok but insert failed: {sub_msg}"
+            if viewer is not None and hasattr(viewer, "refresh"):
+                try:
+                    viewer.refresh()
+                except Exception:
+                    pass
+            return True, f"Replaced text on page {page}."
+        except Exception as exc:
+            return False, f"whiteout_then_insert failed: {exc}"

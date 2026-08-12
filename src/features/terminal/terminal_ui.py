@@ -110,18 +110,15 @@ class TerminalUI(QWidget):
         root.addLayout(input_row)
 
     def _print_banner(self):
-        banner = (
-            "<pre style='color:#cba6f7;'>"
-            "  ______                    _      ______  ______ \n"
-            " /_  __/__  _________  ___ (_)__  /_  __/ /_  __/\n"
-            "  / / / _ \\/ ___/ __ \\/ _ \\/ / _ \\  / /     / /   \n"
-            " / / /  __/ /  / /_/ /  __/ /  __/ / /     / /    \n"
-            "/_/  \\___/_/  / .___/\\___/_/\\___/ /_/     /_/     \n"
-            "              /_/                                   "
+        # ASCII banner — kept short and bold; no logo icon (icons are toolbar-only)
+        self.output.append(
+            "<pre style='color:#cba6f7;font-weight:bold;line-height:1.0'>"
+            " ▀█▀ ▄▀█ █▀ █ █▀▀ █▀▀ █▄░█ █▀▀ █▀█\n"
+            " █░█ █▀█ ▄█ █ ██▄ ██▄ █░▀█ ██▄ █▀▄\n"
+            "  v2  · hacker console  · type <b style='color:#a6e3a1'>help</b> to start"
             "</pre>"
         )
-        self.output.append(banner)
-        self._info("TermiPDF OS v1.0 initialized. Type <b>help</b> to list commands.")
+        self._info("TermiPDF OS v2.0 initialized. Type <b>help</b> to list commands.")
 
     # ------------------------------------------------------------ Output
     def _append_html(self, html: str):

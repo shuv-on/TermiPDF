@@ -148,40 +148,99 @@ class CommandParser:
         return self._help_text()
 
     def _help_text(self) -> str:
-        lines = [
-            "<b style='color:#cba6f7;'>═══ TermiPDF Command Reference ═══</b>",
-            "<br><b style='color:#89b4fa;'>— General —</b>",
-            "  <b>help</b>                       Show this help screen",
-            "  <b>clear</b>                      Clear terminal output",
-            "  <b>exit</b>                       Close TermiPDF",
-            "",
-            "<b style='color:#89b4fa;'>— Viewer / Navigation —</b>",
-            '  <b>open &lt;path&gt;</b>            Open a PDF file',
-            "  <b>close</b>                      Close the current PDF",
-            "  <b>next</b> / <b>prev</b>           Go to next / previous page",
-            "  <b>goto &lt;n&gt;</b>               Jump to page n",
-            "  <b>zoom in</b> / <b>zoom out</b>    Adjust zoom level",
-            "  <b>zoom &lt;float&gt;</b>           Set zoom level (e.g. zoom 1.5)",
-            "  <b>fit</b>                        Fit page to window",
-            "  <b>toc</b>                        Toggle the Table of Contents sidebar",
-            "",
-            "<b style='color:#89b4fa;'>— Annotator (Edge-like) —</b>",
-            "  <b>mode view</b>                  Return to normal scrolling mode",
-            '  <b>mode draw</b> --color &lt;c&gt; --thickness &lt;n&gt;  Freehand ink',
-            "  <b>mode highlight</b>             Click-and-drag or auto-highlight",
-            '  <b>highlight "text"</b>           Auto-highlight all occurrences of "text"',
-            "  <b>mode erase</b>                 Click any annotation to delete it",
-            "  <b>save</b>                       Save annotations into the PDF file",
-            "",
-            "<b style='color:#89b4fa;'>— Editor —</b>",
-            '  <b>addtext "txt"</b> --page 1 --x 100 --y 200 --size 14 --color black',
-            "       Insert Unicode text (supports Bangla) — needs --font if no Kalpurush.ttf",
-            "  <b>extract &lt;from&gt; &lt;to&gt; &lt;out.pdf&gt;</b>",
-            "  <b>merge &lt;f1&gt; &lt;f2&gt; &lt;out.pdf&gt;</b>",
-            "  <b>delete &lt;page&gt;</b>",
-            "  <b>rotate &lt;page&gt; &lt;angle&gt;</b>",
-            "",
-            "<b style='color:#89b4fa;'>— QR Generator —</b>",
-            '  <b>qr "text"</b> --x 100 --y 100 --size 100   Stamp a QR code on the current page',
+        """Rebuilt as a <table> so the description column stays aligned
+        even when the terminal wraps long command lines."""
+        rows = [
+            ("General", [
+                ("help",                       "Show this help screen"),
+                ("clear",                      "Clear terminal output"),
+                ("history",                    "Show history hint"),
+                ("exit",                       "Close TermiPDF"),
+            ]),
+            ("Viewer / Navigation", [
+                ("open &lt;path&gt;",          "Open a PDF file"),
+                ("close",                      "Close the current PDF"),
+                ("next | prev",                "Next / previous page"),
+                ("goto &lt;n&gt;",             "Jump to page n"),
+                ("zoom in | out | &lt;float&gt;", "Zoom controls"),
+                ("fit",                        "Fit page to window"),
+                ("toc",                        "Toggle the outline sidebar"),
+                ("thumbs",                     "Toggle the thumbnail sidebar"),
+                ("find &lt;text&gt;",          "Search &amp; highlight all matches"),
+            ]),
+            ("Annotate (Edge-like)", [
+                ("mode view",                  "Return to normal scrolling"),
+                ("mode draw --color &lt;c&gt; --thickness &lt;n&gt;",
+                 "Freehand ink (multi-color)"),
+                ("mode highlight --color &lt;c&gt;",
+                 "Drag to highlight (multi-color)"),
+                ("mode erase",                 "Click annotation to delete"),
+                ("mode rect | ellipse | arrow","Shape tools"),
+                ("mode note",                  "Drop a sticky note"),
+                ("mode signature",             "Draw &amp; save a signature"),
+                ("mode text | edit-text",      "Insert / replace text"),
+                ("highlight \"text\" --color", "Auto-highlight all occurrences"),
+                ("undo | redo",                "Undo / redo last change"),
+                ("save",                       "Save annotations into the PDF"),
+            ]),
+            ("Edit", [
+                ("addtext \"txt\" --page 1 --x 100 --y 200 --size 14",
+                 "Insert Unicode text (supports Bangla)"),
+                ("edit-text &lt;page&gt; &lt;x&gt; &lt;y&gt; \"new\"",
+                 "Replace existing text at a point"),
+                ("extract &lt;from&gt; &lt;to&gt; &lt;out.pdf&gt;",
+                 "Extract pages to a new PDF"),
+                ("merge &lt;f1&gt; &lt;f2&gt; &lt;out.pdf&gt;",
+                 "Merge two PDFs"),
+                ("merge p-&lt;from&gt; p-&lt;to&gt; &lt;out.pdf&gt;",
+                 "Extract a page range from the open PDF into a new file"),
+                ("gen npdf p-1,2,3 &lt;out.pdf&gt;",
+                 "Generate new PDF with the given pages"),
+                ("split &lt;page&gt; &lt;left.pdf&gt; &lt;right.pdf&gt;",
+                 "Split the open PDF into two files at <page>"),
+                ("delete &lt;page&gt;",        "Delete a page"),
+                ("rotate &lt;page&gt; &lt;angle&gt;",
+                 "Rotate a page"),
+                ("swap &lt;page-A&gt; &lt;page-B&gt;",
+                 "Exchange two pages (positions unchanged elsewhere)"),
+            ]),
+            ("Tools", [
+                ("qr \"text\" --page 1 --x … --y … --size 100",
+                 "Stamp a QR code on a page"),
+                ("stamp-capture &lt;name&gt;", "Save current selection as a stamp"),
+                ("stamp &lt;name&gt; --page n --x … --y …",
+                 "Paste a saved stamp"),
+            ]),
+            ("UI", [
+                ("theme dark | light",         "Switch theme"),
+                ("fullscreen",                 "Toggle fullscreen (F11)"),
+                ("dock bottom | left | right | top | float",
+                 "Move the terminal dock"),
+                ("print",                      "Print the current PDF"),
+            ]),
         ]
-        return "<br>".join(lines)
+
+        parts = [
+            "<div style='font-family:\"JetBrains Mono\",monospace;'>",
+            "<div style='color:#cba6f7;font-weight:bold;font-size:15px;"
+            "margin-bottom:6px'>═══ TermiPDF Command Reference ═══</div>",
+        ]
+        for section, items in rows:
+            parts.append(
+                f"<div style='color:#89b4fa;font-weight:bold;"
+                f"margin:6px 0 2px 0'>— {section} —</div>"
+            )
+            parts.append(
+                "<table cellspacing='0' cellpadding='2' width='100%'>"
+            )
+            for cmd, desc in items:
+                parts.append(
+                    "<tr>"
+                    f"<td width='260' style='color:#a6e3a1;"
+                    f"white-space:nowrap;vertical-align:top'>{cmd}</td>"
+                    f"<td style='color:#cdd6f4;vertical-align:top'>{desc}</td>"
+                    "</tr>"
+                )
+            parts.append("</table>")
+        parts.append("</div>")
+        return "".join(parts)

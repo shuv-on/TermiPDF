@@ -121,3 +121,125 @@ class PDFManipulator:
             return True, f"Rotated page {page_num} by {angle}°"
         except Exception as exc:
             return False, f"Rotate failed: {exc}"
+
+    # ---------------------------------------------------------- reorder
+    @staticmethod
+    def reorder_pages(src_path: str, new_order_1based: list,
+                      out_path: Optional[str] = None) -> tuple[bool, str]:
+        """Rewrite the PDF so the pages appear in ``new_order_1based``.
+
+        ``new_order_1based`` is a permutation of 1..N where N is the
+        current page count. In-place when ``out_path`` is None (same
+        temp-file + atomic-replace pattern as the other in-place ops).
+        Returns (ok, message).
+        """
+        if not os.path.isfile(src_path):
+            return False, f"PDF not found: {src_path}"
+        try:
+            doc = fitz.open(src_path)
+            n = len(doc)
+            if not new_order_1based or len(new_order_1based) != n:
+                doc.close()
+                return False, (
+                    f"new_order must contain exactly {n} page numbers "
+                    f"(got {len(new_order_1based) if new_order_1based else 0})")
+            # Validate: every page in 1..N must appear exactly once.
+            if sorted(int(p) for p in new_order_1based) != list(range(1, n + 1)):
+                doc.close()
+                return False, (
+                    f"new_order must be a permutation of 1..{n}; got "
+                    f"{new_order_1based}")
+            new_doc = fitz.open()
+            for p in new_order_1based:
+                new_doc.insert_pdf(doc, from_page=int(p) - 1,
+                                   to_page=int(p) - 1)
+            if out_path is None:
+                tmp = src_path + ".tmp.pdf"
+                new_doc.save(tmp, garbage=4, deflate=True)
+                new_doc.close()
+                doc.close()
+                os.replace(tmp, src_path)
+            else:
+                new_doc.save(out_path, garbage=4, deflate=True)
+                new_doc.close()
+                doc.close()
+            return True, f"Reordered {n} pages in {src_path}"
+        except Exception as exc:
+            return False, f"Reorder failed: {exc}"
+
+    # -------------------------------------------------------------- move
+    @staticmethod
+    def move_page(src_path: str, src_page: int, target_position: int,
+                  out_path: Optional[str] = None) -> tuple[bool, str]:
+        """Move ``src_page`` (1-based) to ``target_position`` (1-based) and
+        shift everything between to fill the gap. Simpler API than
+        ``reorder_pages`` — handy for drag-and-drop where the user picks
+        a single page and a single target slot.
+
+        Returns (ok, message). No-op (and success) when src==target.
+        """
+        if not os.path.isfile(src_path):
+            return False, f"PDF not found: {src_path}"
+        try:
+            doc = fitz.open(src_path)
+            n = len(doc)
+            if src_page < 1 or src_page > n:
+                doc.close()
+                return False, f"Invalid src_page {src_page} (1..{n})"
+            if target_position < 1 or target_position > n:
+                doc.close()
+                return False, f"Invalid target_position {target_position} (1..{n})"
+            if src_page == target_position:
+                doc.close()
+                return True, "Page already at target position."
+            # Build the new order: remove src_page, then re-insert at
+            # target_position (1-based after removal).
+            order = list(range(1, n + 1))
+            order.remove(src_page)
+            # After removal the list has n-1 entries. The new position
+            # is target_position in the post-removal indexing; if the
+            # user dragged below their original slot we clamp.
+            target_position = max(1, min(target_position, n))
+            order.insert(target_position - 1, src_page)
+            doc.close()
+            return PDFManipulator.reorder_pages(src_path, order, out_path)
+        except Exception as exc:
+            return False, f"Move failed: {exc}"
+
+    # -------------------------------------------------------------- swap
+    @staticmethod
+    def swap_pages(src_path: str, page_a: int, page_b: int,
+                   out_path: Optional[str] = None) -> tuple[bool, str]:
+        """Exchange pages ``page_a`` and ``page_b`` (1-based) in-place.
+
+        Unlike ``move_page`` (which inserts the source at the target and
+        shifts the intervening pages), swap keeps the total page count
+        unchanged and preserves the relative order of every other page —
+        the user asks for "swap two pages", not "shuffle the doc".
+
+        If ``page_a == page_b`` this is a no-op (returns success) so the
+        GUI can call it unconditionally on every drop.
+        """
+        if not os.path.isfile(src_path):
+            return False, f"PDF not found: {src_path}"
+        try:
+            doc = fitz.open(src_path)
+            n = len(doc)
+            if page_a < 1 or page_a > n:
+                doc.close()
+                return False, f"Invalid page_a {page_a} (1..{n})"
+            if page_b < 1 or page_b > n:
+                doc.close()
+                return False, f"Invalid page_b {page_b} (1..{n})"
+            if page_a == page_b:
+                doc.close()
+                return True, f"Pages {page_a} and {page_b} are identical; no-op."
+            # Build the new order: identity permutation, then exchange
+            # the two slots. Falls back to reorder_pages for the actual
+            # write so we get the same atomic-replace, in-place behavior.
+            order = list(range(1, n + 1))
+            order[page_a - 1], order[page_b - 1] = order[page_b - 1], order[page_a - 1]
+            doc.close()
+            return PDFManipulator.reorder_pages(src_path, order, out_path)
+        except Exception as exc:
+            return False, f"Swap failed: {exc}"

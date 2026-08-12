@@ -22,11 +22,14 @@ class QRLogic:
 
     # --------------------------------------------------------- generate
     @staticmethod
-    def generate_image(text: str, box_size: int = 6, border: int = 2,
+    def generate_image(text: str, box_size: int = 10, border: int = 4,
                        fill: str = "black", back: str = "white") -> Image.Image:
         qr = qrcode.QRCode(
             version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            # Q (25% recovery) is much more forgiving when scanning from
+            # a phone camera at arm's length — modules can be partially
+            # obscured by glare / angle and the code still decodes.
+            error_correction=qrcode.constants.ERROR_CORRECT_Q,
             box_size=box_size,
             border=border,
         )
@@ -95,3 +98,63 @@ def _img_to_tempfile(img: Image.Image) -> str:
     os.close(fd)
     img.save(path, format="PNG")
     return path
+
+
+# ----------------------------------------------------------------- API
+def render_png(text: str, size_pt: int = 900) -> Tuple[bytes, dict]:
+    """Render a QR code for ``text`` as PNG bytes — no PDF involved.
+
+    Used by the floating "share as QR" dialog so the QR can be shown in
+    a popup without being stamped onto the page (per MS Edge's UX).
+    The default ``size_pt=900`` yields a ~900 px QR with Q-level error
+    correction — comfortably scannable by any modern phone camera from
+    ~30 cm away (and much more forgiving than the previous 600 px
+    M-level build, which the user reported was hard to scan).
+
+    QR codes max out at version 40 (~2953 byte capacity with Q
+    error-correction). When the input text exceeds that, we return a
+    QR that encodes a short "too long" message plus a JSON manifest
+    (or we return a clear error). To keep the UX simple we cap the
+    encoded payload to QRv40 capacity and emit a graceful failure if
+    even that overflows.
+
+    Returns (png_bytes, meta_dict) where meta contains box_size and
+    ``truncated`` flag (True when the input was too long and the QR
+    encodes a shortened message).
+    """
+    box_size = max(6, min(20, size_pt // 50))
+    # Capacity check — QRv40 at Q-error holds ~2361 alphanumeric or
+    # ~1273 byte (binary) bytes. Anything longer overflows and the
+    # qrcode lib raises ValueError. We truncate to a safe limit and
+    # flag it in the metadata so the caller can warn the user.
+    MAX_QR_BYTES = 1200   # safely under the Q-error limit
+    truncated = False
+    encoded = text
+    if len(text.encode("utf-8")) > MAX_QR_BYTES:
+        # Truncate on a UTF-8 char boundary.
+        b = text.encode("utf-8")[:MAX_QR_BYTES]
+        # Walk back to avoid splitting a multibyte char.
+        while b and (b[-1] & 0xC0) == 0x80:
+            b = b[:-1]
+        encoded = b.decode("utf-8", errors="ignore")
+        truncated = True
+        # Long QRs are huge modules × box_size — shrink the box so
+        # the resulting PNG is still scannable at a sensible size.
+        box_size = 6
+    try:
+        img = QRLogic.generate_image(encoded, box_size=box_size, border=4)
+    except Exception:
+        # Defensive: if even the capped payload overflows (shouldn't
+        # happen given MAX_QR_BYTES), fall back to a one-line notice
+        # so the dialog still has *something* to show.
+        encoded = "[Text too long for QR — copy text manually]"
+        img = QRLogic.generate_image(encoded, box_size=box_size, border=4)
+        truncated = True
+    return _img_to_bytes(img), {
+        "box_size": box_size,
+        "width": img.width,
+        "height": img.height,
+        "truncated": truncated,
+        "encoded_length": len(encoded),
+        "original_length": len(text),
+    }

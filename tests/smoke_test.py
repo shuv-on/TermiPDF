@@ -109,6 +109,41 @@ def main() -> int:
     ok, msg = annot.highlight_rect(__import__("PyQt6").QtCore.QRectF(20, 20, 80, 20))
     check("highlight_rect runs", isinstance(ok, bool), msg)
 
+    # Highlight color regression: previously fitz.utils.getColor("#hex")
+    # returned white for any hex string, so highlights were invisible.
+    # The new _to_fitz_color path bypasses getColor and returns the
+    # actual float triple.
+    annot.set_highlight_color((1.0, 0.0, 0.0))
+    annot.highlight_rect(__import__("PyQt6").QtCore.QRectF(40, 40, 60, 20))
+    page = eng.get_page(0)
+    last_hl = None
+    for a in page.annots() or []:
+        if int(a.type[0]) == 8:
+            last_hl = a
+    if last_hl is not None:
+        stroke_rgb = last_hl.colors.get("stroke", [])
+        check("highlight color is the requested one (not white)",
+              tuple(round(float(v), 2) for v in stroke_rgb) == (1.0, 0.0, 0.0),
+              f"got {list(stroke_rgb)}")
+    else:
+        check("highlight color regression: annot present", False,
+              "no highlight annot found on page")
+
+    # Same regression check for ink: red ink should actually be red.
+    annot.set_ink_color((0.0, 1.0, 0.0))
+    stroke2 = CanvasStroke(points=[fitz.Point(50, 50), fitz.Point(120, 50)],
+                           color_rgb=(0.0, 1.0, 0.0), thickness=2.0)
+    annot.add_ink_stroke(stroke2)
+    last_ink = None
+    for a in page.annots() or []:
+        if int(a.type[0]) == 15:  # PDF_ANNOT_INK
+            last_ink = a
+    if last_ink is not None:
+        stroke_rgb = last_ink.colors.get("stroke", [])
+        check("ink color is the requested one (not white)",
+              tuple(round(float(v), 2) for v in stroke_rgb) == (0.0, 1.0, 0.0),
+              f"got {list(stroke_rgb)}")
+
     # --------------------------------------------------------------- T4
     section("T4 — TextEditor: English + Bangla (Unicode) text insertion")
     editor = TextEditor(eng)
@@ -221,6 +256,167 @@ def main() -> int:
         check("invalid color raises", False, "did not raise")
     except ValueError:
         check("invalid color raises ValueError", True)
+
+    # --------------------------------------------------------------- T9
+    section("T9 — Phase 4: viewer engine find_all + render_thumbnail")
+    eng_find = ViewerEngine()
+    eng_find.open(pdf_src)
+    matches = eng_find.find_all("test")
+    check("find_all returns list", isinstance(matches, list), f"{len(matches)} match(es)")
+    matches2 = eng_find.find_all("definitely_not_in_document_xyz")
+    check("find_all returns empty for missing term", matches2 == [],
+          f"{len(matches2)} match(es)")
+    thumb = eng_find.render_thumbnail(0)
+    check("render_thumbnail produces PNG bytes",
+          isinstance(thumb, bytes) and len(thumb) > 0,
+          f"{len(thumb) if thumb else 0} bytes")
+
+    # --------------------------------------------------------------- T10
+    section("T10 — Phase 4: annotation shapes (rect / ellipse / arrow / note / signature)")
+    eng_shape = ViewerEngine()
+    eng_shape.open(pdf_src)
+    annot_shape = AnnotationEngine(eng_shape)
+    from PyQt6.QtCore import QRectF, QPointF
+
+    ok, msg = annot_shape.add_rect(QRectF(50, 50, 200, 100))
+    check("add_rect runs", ok, msg)
+    ok, msg = annot_shape.add_ellipse(QRectF(50, 200, 200, 100))
+    check("add_ellipse runs", ok, msg)
+    ok, msg = annot_shape.add_arrow(QPointF(50, 350), QPointF(250, 400))
+    check("add_arrow runs", ok, msg)
+    ok, msg = annot_shape.add_sticky_note(QPointF(100, 450), "Hello note")
+    check("add_sticky_note runs", ok, msg)
+
+    # Signature needs real PNG bytes
+    from PIL import Image
+    import io
+    sig_img = Image.new("RGBA", (200, 60), (255, 255, 255, 0))
+    buf = io.BytesIO()
+    sig_img.save(buf, format="PNG")
+    sig_bytes = buf.getvalue()
+    ok, msg = annot_shape.add_signature(QRectF(50, 500, 200, 60), sig_bytes)
+    check("add_signature runs", ok, msg)
+
+    # Confirm at least 4 annotations now exist on page 1
+    # (rect + ellipse + arrow + sticky note; the signature uses insert_image,
+    # not a PDF annotation, so it doesn't appear in page.annots().)
+    page_obj = eng_shape.get_page(0)
+    n_annots = len(list(page_obj.annots() or []))
+    check("shapes persisted as annotations", n_annots >= 4, f"{n_annots} annot(s)")
+
+    # --------------------------------------------------------------- T11
+    section("T11 — Phase 4: text_editor.whiteout_then_insert")
+    eng_whiteout = ViewerEngine()
+    eng_whiteout.open(pdf_src)
+    ed_whiteout = TextEditor(eng_whiteout)
+    ok, msg = ed_whiteout.whiteout_then_insert(
+        page=1, x=50, y=200, new_text="Replaced!", font_size=14,
+        width=200, height=24, viewer=None)
+    check("whiteout_then_insert runs", ok, msg)
+
+    # --------------------------------------------------------------- T12
+    section("T12 — Phase 4: undo/redo round-trip")
+    eng_undo = ViewerEngine()
+    eng_undo.open(pdf_src)
+    from features.pdf_editor.undo_stack import UndoStack
+    stack = UndoStack(eng_undo)
+    page0 = eng_undo.get_page(0)
+
+    # Add an ink annotation and push to undo stack
+    pre_count = len(list(page0.annots() or []))
+    annot_obj = page0.add_ink_annot([[(10, 10), (60, 40), (120, 30)]])
+    annot_obj.update()
+    stack.push_added(0, annot_obj)
+    post_count = len(list(page0.annots() or []))
+    check("ink annotation added", post_count == pre_count + 1,
+          f"{pre_count} → {post_count}")
+
+    # Undo
+    ok, msg = stack.undo()
+    check("undo ok", ok, msg)
+    after_undo = len(list(eng_undo.get_page(0).annots() or []))
+    check("annotation removed by undo", after_undo == pre_count,
+          f"{after_undo} annot(s)")
+
+    # Redo
+    ok, msg = stack.redo()
+    check("redo ok", ok, msg)
+    after_redo = len(list(eng_undo.get_page(0).annots() or []))
+    check("annotation re-added by redo", after_redo == post_count,
+          f"{after_redo} annot(s)")
+
+    # --------------------------------------------------------------- T13
+    section("T13 — Phase 4: RecentFiles persistence")
+    from features.pdf_viewer.recent_files import RecentFiles
+    rf_tmp = tmp / "rf_test"
+    rf_tmp.mkdir()
+    rf_path = str(rf_tmp / "recent.json")
+    rf = RecentFiles(path=rf_path)
+    rf.add(pdf_src)
+    rf.add(pdf_src)  # de-dupe
+    items = rf.list()
+    check("recent dedupe to 1 entry", len(items) == 1, f"{len(items)} item(s)")
+    rf2 = RecentFiles(path=rf_path)
+    items2 = rf2.list()
+    check("recent persists across instances",
+          items2 == items, f"{items2}")
+
+    # --------------------------------------------------------------- T14
+    section("T14 — Text selection (extract_text_at / extract_text_in_rect)")
+    from features.pdf_viewer.text_selector import (
+        extract_text_at, extract_text_in_rect, is_ocr_available,
+    )
+    # Build a PDF that contains known text we can extract
+    known_pdf = str(tmp / "with_text.pdf")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 50), "TermiPDF hello world")
+    page.insert_text((50, 80), "Second line of text")
+    doc.save(known_pdf)
+    doc.close()
+    eng_text = ViewerEngine()
+    eng_text.open(known_pdf)
+
+    # Click near "hello"
+    ok, txt = extract_text_at(eng_text, fitz.Point(170, 55))
+    check("extract_text_at finds word", ok and "hello" in txt, txt)
+
+    # Drag-select a region covering both lines
+    from PyQt6.QtCore import QRectF
+    ok, txt = extract_text_in_rect(eng_text, QRectF(40, 40, 300, 60))
+    check("extract_text_in_rect finds both lines", ok and "hello" in txt
+          and "Second" in txt, txt.replace("\n", " | "))
+
+    # OCR availability probe (don't require tesseract; just exercise the call)
+    val = is_ocr_available()
+    check("is_ocr_available returns bool", isinstance(val, bool), str(val))
+
+    # Empty page → no text → friendly fallback message
+    empty_pdf = str(tmp / "empty.pdf")
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(empty_pdf)
+    doc.close()
+    eng_empty = ViewerEngine()
+    eng_empty.open(empty_pdf)
+    ok, txt = extract_text_at(eng_empty, fitz.Point(50, 50))
+    check("empty page reports no text", not ok or "install" in txt.lower()
+          or txt == "", txt)
+
+    # --------------------------------------------------------------- T15
+    section("T15 — Canvas center-alignment helper (QApplication required)")
+    # The viewer UI now wraps the surface in a centering container; we
+    # verify the holder widget structure exists in source code.
+    viewer_ui_src = (PROJECT_ROOT / "src" / "features" / "pdf_viewer"
+                     / "viewer_ui.py").read_text()
+    check("viewer_ui defines _canvas_holder",
+          "_canvas_holder" in viewer_ui_src)
+    check("viewer_ui sets widgetResizable(True)",
+          "setWidgetResizable(True)" in viewer_ui_src)
+    check("viewer_ui uses QHBoxLayout for centering",
+          "QHBoxLayout" in viewer_ui_src)
+    check("viewer_ui exposes SELECT mode",
+          "SELECT" in viewer_ui_src and "select" in viewer_ui_src)
 
     # --------------------------------------------------------------- Summary
     print()
