@@ -1,0 +1,185 @@
+/* ============================================
+   TermiPDF Modern Theme (Dracula/Nord Hybrid)
+   ============================================ */
+
+/* ---------- Global App ---------- */
+QWidget {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    font-family: "JetBrains Mono", "Consolas", "Cascadia Code", monospace;
+    font-size: 13px;
+}
+
+/* ---------- Main Window ---------- */
+QMainWindow {
+    background-color: #181825;
+}
+
+/* ---------- Toolbar ---------- */
+QToolBar {
+    background-color: #11111b;
+    border-bottom: 2px solid #313244;
+    spacing: 6px;
+    padding: 4px;
+}
+QToolBar QToolButton {
+    background-color: #313244;
+    color: #cdd6f4;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-weight: bold;
+}
+QToolBar QToolButton:hover {
+    background-color: #45475a;
+    color: #f9e2af;
+}
+
+/* ---------- Splitter ---------- */
+QSplitter::handle {
+    background-color: #313244;
+}
+QSplitter::handle:horizontal {
+    width: 3px;
+}
+QSplitter::handle:vertical {
+    height: 3px;
+}
+
+/* ---------- Buttons ---------- */
+QPushButton {
+    background-color: #89b4fa;
+    color: #11111b;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background-color: #b4befe;
+}
+QPushButton:pressed {
+    background-color: #74c7ec;
+}
+QPushButton#danger {
+    background-color: #f38ba8;
+    color: #11111b;
+}
+QPushButton#danger:hover {
+    background-color: #eba0ac;
+}
+
+/* ---------- Text / Input ---------- */
+QLineEdit {
+    background-color: #11111b;
+    color: #a6e3a1;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 6px;
+    selection-background-color: #45475a;
+}
+QLineEdit:focus {
+    border: 1px solid #89b4fa;
+}
+
+QTextEdit, QPlainTextEdit {
+    background-color: #11111b;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 4px;
+    selection-background-color: #45475a;
+}
+
+/* ---------- Tree (TOC) ---------- */
+QTreeView, QTreeWidget {
+    background-color: #181825;
+    alternate-background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    selection-background-color: #45475a;
+    selection-color: #f9e2af;
+    outline: 0;
+}
+QTreeView::branch:has-children:closed,
+QTreeWidget::branch:has-children:closed {
+    image: none;
+}
+QHeaderView::section {
+    background-color: #313244;
+    color: #f9e2af;
+    padding: 4px;
+    border: none;
+}
+
+/* ---------- Scrollbar ---------- */
+QScrollBar:vertical {
+    background: #181825;
+    width: 12px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #45475a;
+    min-height: 24px;
+    border-radius: 6px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #585b70;
+}
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QScrollBar:horizontal {
+    background: #181825;
+    height: 12px;
+    margin: 0;
+}
+QScrollBar::handle:horizontal {
+    background: #45475a;
+    min-width: 24px;
+    border-radius: 6px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #585b70;
+}
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+
+/* ---------- Menu ---------- */
+QMenuBar {
+    background-color: #11111b;
+    color: #cdd6f4;
+}
+QMenuBar::item:selected {
+    background-color: #45475a;
+}
+QMenu {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+}
+QMenu::item:selected {
+    background-color: #45475a;
+}
+
+/* ---------- Status Bar ---------- */
+QStatusBar {
+    background-color: #11111b;
+    color: #a6adc8;
+    border-top: 1px solid #313244;
+}
+
+/* ---------- Labels ---------- */
+QLabel#statusLabel {
+    color: #a6e3a1;
+    font-weight: bold;
+}
+QLabel#modeLabel {
+    color: #f9e2af;
+    font-weight: bold;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background-color: #313244;
+}

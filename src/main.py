@@ -1,24 +1,53 @@
+"""
+main.py — TermiPDF entry point.
+
+Run with:
+    source .venv/bin/activate
+    python src/main.py
+
+This file is intentionally minimal: it only constructs the QApplication,
+loads the QSS theme, and shows the main window. All feature logic lives
+under src/features/.
+"""
+from __future__ import annotations
+
 import sys
+from pathlib import Path
+
 from PyQt6.QtWidgets import QApplication
 
-# import window class from ui folder
-from ui.main_window import TermiPDFWindow
-        
-# 02. Main function (App start from here)
-def main():
-    # An object QApplication is need every PyQt Application
-    app = QApplication(sys.argv) # Terminal command control likes: for run main.py --> python src/main.py 
-    
-    # Create class object 
-    window = TermiPDFWindow()
-    
-    # Show window to screen
-    window.show()
-    
-    # Event loop: App run while user doesn't exit
-    sys.exit(app.exec())
-# 03. Python standard entry Point
-if __name__ == "__main__":
-    main()
+# Make 'src.' imports work whether the user runs `python src/main.py` from
+# the project root OR `python -m src.main`.
+_SRC = Path(__file__).resolve().parent
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
-          
+from shared.utils.path_solver import style_path  # noqa: E402
+from main_window import TermiPDFWindow             # noqa: E402
+
+
+def _load_stylesheet(app: QApplication) -> None:
+    qss_path = style_path("modern_theme.qss")
+    try:
+        with open(qss_path, "r", encoding="utf-8") as fh:
+            app.setStyleSheet(fh.read())
+    except FileNotFoundError:
+        # Without the QSS the app still works (falls back to defaults).
+        print(f"[TermiPDF] Warning: theme file not found at {qss_path}")
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    app.setApplicationName("TermiPDF")
+    app.setOrganizationName("TermiPDF")
+
+    _load_stylesheet(app)
+
+    window = TermiPDFWindow()
+    window.show()
+
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
