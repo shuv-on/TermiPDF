@@ -66,11 +66,18 @@ class CanvasEventRouter:
     """Bridges viewer canvas ↔ annotation engine + undo stack."""
 
     def __init__(self, viewer: ViewerEngine, annot: AnnotationEngine,
-                 ui: PDFViewerUI, undo_stack: Optional[object] = None):
+                 ui: PDFViewerUI, undo_stack: Optional[object] = None,
+                 editor: Optional[object] = None):
         self.viewer = viewer
         self.annot = annot
         self.ui = ui
         self.undo = undo_stack  # may be None for headless use
+        # TextEditor is optional but required for "Insert text" / "Edit
+        # text" mode. Without it those modes crash with
+        # AttributeError: 'CanvasEventRouter' object has no attribute
+        # 'editor' — we keep the field optional so headless tests can
+        # still instantiate the router without a TextEditor.
+        self.editor = editor
         # Background save state — only one save worker in flight at a
         # time so we don't accumulate zombie threads.
         self._save_thread: Optional[QThread] = None
@@ -355,6 +362,8 @@ class CanvasEventRouter:
         return msg
 
     def _on_request_text_insert(self, pt: QPointF):
+        if self.editor is None:
+            return "Insert text: editor not wired up."
         from PyQt6.QtWidgets import QInputDialog
         text, ok = QInputDialog.getText(
             None, "Insert text", "Text:")
@@ -369,6 +378,8 @@ class CanvasEventRouter:
 
     def _on_request_edit_text(self, pt: QPointF):
         """Replace the text nearest to (x, y) on the current page."""
+        if self.editor is None:
+            return "Edit text: editor not wired up."
         if not self.viewer.is_open:
             return "No PDF open."
         try:

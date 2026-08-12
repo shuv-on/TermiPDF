@@ -22,8 +22,19 @@ class QRLogic:
 
     # --------------------------------------------------------- generate
     @staticmethod
-    def generate_image(text: str, box_size: int = 10, border: int = 4,
+    def generate_image(text: str, box_size: int = 10, border: int = 6,
                        fill: str = "black", back: str = "white") -> Image.Image:
+        """Render a QR PNG.
+
+        ``border`` is the quiet-zone width in MODULES (not pixels). The
+        QR spec requires 4 modules of quiet zone; we use 6 to give the
+        scanner plenty of clean white around the corner finder patterns
+        — phones with mediocre cameras tend to miss the corner finders
+        when the quiet zone is right at the spec minimum. The user
+        reported "main corner is not finding on the frame of qr" — that
+        symptom is the scanner failing to detect the three corner
+        finder patterns because they sit too close to the image edge.
+        """
         qr = qrcode.QRCode(
             version=None,
             # Q (25% recovery) is much more forgiving when scanning from
@@ -142,13 +153,13 @@ def render_png(text: str, size_pt: int = 900) -> Tuple[bytes, dict]:
         # the resulting PNG is still scannable at a sensible size.
         box_size = 6
     try:
-        img = QRLogic.generate_image(encoded, box_size=box_size, border=4)
+        img = QRLogic.generate_image(encoded, box_size=box_size, border=6)
     except Exception:
         # Defensive: if even the capped payload overflows (shouldn't
         # happen given MAX_QR_BYTES), fall back to a one-line notice
         # so the dialog still has *something* to show.
         encoded = "[Text too long for QR — copy text manually]"
-        img = QRLogic.generate_image(encoded, box_size=box_size, border=4)
+        img = QRLogic.generate_image(encoded, box_size=box_size, border=6)
         truncated = True
     return _img_to_bytes(img), {
         "box_size": box_size,

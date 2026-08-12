@@ -229,14 +229,41 @@ def _p_pen(p, r, c):
 
 
 def _p_eraser(p, r, c):
+    """Diagonal-tipped rubber eraser (recognizable pink/blue eraser shape).
+
+    Two halves: the tip (lighter) and the body (darker), with a metal
+    band in the middle. Drawn at 45° so the tip points up-left, like
+    the classic office-eraser icon. Much clearer than just a rectangle
+    — the user previously couldn't tell which toolbar button was the
+    eraser because the rect-with-divider silhouette looked like a
+    generic shape.
+    """
     _setup_painter(p, r, c)
-    # Rectangle eraser with diagonal
-    p.drawRoundedRect(QRectF(r.left() + r.width() * 0.1,
-                              r.top() + r.height() * 0.25,
-                              r.width() * 0.8, r.height() * 0.5), 2, 2)
-    # Divider
-    p.drawLine(QPointF(r.left() + r.width() * 0.45, r.top() + r.height() * 0.25),
-               QPointF(r.left() + r.width() * 0.55, r.top() + r.height() * 0.75))
+    # Two rectangles: the tip (lighter stroked) and the body (filled)
+    # arranged diagonally. We compute corners from r.
+    pad = 0.12
+    body = QRectF(r.left() + r.width() * pad,
+                  r.top() + r.height() * (0.5 - pad),
+                  r.width() * (1 - 2 * pad),
+                  r.height() * (1 - 2 * pad))
+    # Body outline (the rubber part we hold)
+    p.drawRoundedRect(body, 2, 2)
+    # A short cross-line so the rectangle reads as erasable (not generic)
+    p.drawLine(QPointF(body.left() + body.width() * 0.25,
+                       body.bottom() - body.height() * 0.2),
+               QPointF(body.left() + body.width() * 0.25,
+                       body.bottom() - body.height() * 0.05))
+    p.drawLine(QPointF(body.left() + body.width() * 0.25,
+                       body.bottom() - body.height() * 0.05),
+               QPointF(body.left() + body.width() * 0.75,
+                       body.bottom() - body.height() * 0.05))
+    # Eraser mark — small arc trailing off the tip to show "rubbed"
+    mark = QPainterPath()
+    mark.moveTo(body.left() + 2, body.top() - 2)
+    mark.cubicTo(body.left() - 3, body.top() - 4,
+                 body.left() - 5, body.top() - 1,
+                 body.left() - 4, body.top() + 2)
+    p.drawPath(mark)
 
 
 def _p_highlight(p, r, c):
@@ -612,6 +639,47 @@ def _p_screenshot(p, r, c):
     p.drawEllipse(QPointF(cx, cy), r.width() * 0.10, r.height() * 0.10)
 
 
+def _p_screenshot_region(p, r, c):
+    """Region-screenshot icon: dashed crop brackets with a hand-cursor
+    arrow, so it's clearly distinct from the page-screenshot icon."""
+    _setup_painter(p, r, c)
+    # Dashed-corner brackets (smaller than the page icon)
+    bracket = 0.18
+    pen = p.pen()
+    pen.setStyle(Qt.PenStyle.DashLine)
+    p.setPen(pen)
+    # Top-left
+    p.drawLine(QPointF(r.left(), r.top() + r.height() * bracket),
+               QPointF(r.left(), r.top()))
+    p.drawLine(QPointF(r.left(), r.top()),
+               QPointF(r.left() + r.width() * bracket, r.top()))
+    # Top-right
+    p.drawLine(QPointF(r.right() - r.width() * bracket, r.top()),
+               QPointF(r.right(), r.top()))
+    p.drawLine(QPointF(r.right(), r.top()),
+               QPointF(r.right(), r.top() + r.height() * bracket))
+    # Bottom-left
+    p.drawLine(QPointF(r.left(), r.bottom() - r.height() * bracket),
+               QPointF(r.left(), r.bottom()))
+    p.drawLine(QPointF(r.left(), r.bottom()),
+               QPointF(r.left() + r.width() * bracket, r.bottom()))
+    # Bottom-right
+    p.drawLine(QPointF(r.right() - r.width() * bracket, r.bottom()),
+               QPointF(r.right(), r.bottom()))
+    p.drawLine(QPointF(r.right(), r.bottom()),
+               QPointF(r.right(), r.bottom() - r.height() * bracket))
+    # Reset to solid pen
+    pen.setStyle(Qt.PenStyle.SolidLine)
+    p.setPen(pen)
+    # Arrow head in the middle (suggests "drag a region")
+    cx = r.left() + r.width() * 0.5
+    cy = r.top() + r.height() * 0.5
+    p.drawLine(QPointF(cx - r.width() * 0.10, cy - r.height() * 0.10),
+               QPointF(cx, cy))
+    p.drawLine(QPointF(cx, cy),
+               QPointF(cx + r.width() * 0.10, cy + r.height() * 0.10))
+
+
 def _p_stamp_qr(p, r, c):
     """QR code on a paper — 'Stamp QR' icon (with popup affordance)."""
     _setup_painter(p, r, c, fill=QColor("#89b4fa"))
@@ -734,6 +802,7 @@ _PAINTERS: Dict[str, PainterFn] = {
     "dock-float":   _p_dock_float,
     "select":       _p_select,
     "screenshot":   _p_screenshot,
+    "screenshot-region": _p_screenshot_region,
     "stamp-qr":     _p_stamp_qr,
     "chevron-up":   _p_chevron_up,
     "chevron-down": _p_chevron_down,

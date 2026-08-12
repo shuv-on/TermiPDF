@@ -122,8 +122,23 @@ class QRShareDialog(QDialog):
             qr_label = QLabel("(failed to render QR)")
             qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         else:
-            # Scale up to a comfortable scan size — chosen so the whole
-            # dialog fits on a typical 1080p screen without overflow.
+            # The QR image is delivered with a built-in 4-module quiet
+            # zone (the white border the spec requires for scanners to
+            # find the corner finder patterns). The dialog MUST preserve
+            # that quiet zone — losing even a few pixels of it makes a
+            # phone camera struggle to detect the orientation.
+            #
+            # Two rules to keep it intact:
+            #   1. Do NOT let Qt scale the pixmap down to fit the label
+            #      — that eats the quiet zone. We set the label's fixed
+            #      size to the pixmap's native size so the widget is
+            #      exactly the size of the image.
+            #   2. Do NOT apply `padding` on the QLabel via QSS — the
+            #      padding is drawn *inside* the label's content rect
+            #      and Qt centers the pixmap within the remaining area,
+            #      which (depending on aspect ratio) clips the edges.
+            #      The white "frame" you see in the popup is the QR's
+            #      own quiet zone, not a CSS border.
             target_px = self.QR_MIN_PX
             if img.width() < target_px or img.height() < target_px:
                 img = img.scaled(
@@ -135,12 +150,16 @@ class QRShareDialog(QDialog):
             self._qr_pixmap = pix
             qr_label = QLabel()
             qr_label.setPixmap(pix)
+            # Pin the label to the pixmap's native size. With
+            # setFixedSize + setScaledContents(False) Qt does NOT scale
+            # the pixmap — it draws it at native size and the label
+            # border becomes the visual frame. Any padding in the QSS
+            # would clip the quiet zone, so we don't add any.
+            qr_label.setFixedSize(pix.size())
+            qr_label.setScaledContents(False)
             qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            qr_label.setMinimumSize(target_px, target_px)
-            qr_label.setMaximumSize(target_px + 80, target_px + 80)
         self._qr_label = qr_label
         qr_label.setObjectName("qrShareImage")
-        qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hero_layout.addWidget(qr_label, stretch=0, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Subtle hint below the QR
@@ -245,6 +264,10 @@ class QRShareDialog(QDialog):
         """)
 
         # Hero section: very subtle inner card for the QR.
+        # NB: the qrShareImage QLabel has NO padding here — the QR
+        # pixmap already contains its own 4-module quiet zone (white
+        # border). Adding padding crops that border and the corner
+        # finder patterns become un-scannable.
         for child in self._card.findChildren(QFrame):
             if child.objectName() == "qrShareHero":
                 child.setStyleSheet(f"""
@@ -255,7 +278,6 @@ class QRShareDialog(QDialog):
                         background: white;
                         border: 1px solid {border};
                         border-radius: 10px;
-                        padding: 14px;
                     }}
                     QLabel#qrShareHint {{ color: {subtle}; font-size: 11px; }}
                 """)

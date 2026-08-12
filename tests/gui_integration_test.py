@@ -673,6 +673,19 @@ def main() -> int:
         check("GUI: engine reloads after swap, page_count still 4",
               swap_window.engine.page_count == 4,
               f"page_count={swap_window.engine.page_count}")
+        # Bug regression: previously ViewerEngine.close() set path=None
+        # which made reload_from_disk() return "No path to reload" and
+        # left the engine with 0 pages. The swap "appeared not to work"
+        # even though the file on disk was correct. Verify path is
+        # preserved after close() so reload can find the file.
+        swap_window.engine.close()
+        check("GUI: ViewerEngine.close() preserves path (for reload)",
+              swap_window.engine.path == swap_pdf,
+              f"path={swap_window.engine.path}")
+        ok, _msg = swap_window.engine.reload_from_disk()
+        check("GUI: ViewerEngine.reload_from_disk() works after close",
+              ok and swap_window.engine.page_count == 4,
+              f"ok={ok} page_count={swap_window.engine.page_count}")
         _doc.close()
         swap_window._pages_manager.close()
     swap_window.close()
@@ -873,8 +886,50 @@ def main() -> int:
           len(dialogs) >= 1,
           f"{len(dialogs)} QRShareDialog(s) visible")
     if dialogs:
+        # The test setup creates a "broken" QR dialog (invalid PNG
+        # bytes) earlier in the suite; that one survives as a
+        # top-level widget with a placeholder label. The QR dialog
+        # we actually want to inspect is the one rendered from a
+        # real text selection — find the one whose qrShareImage label
+        # has a non-empty pixmap.
+        from PyQt6.QtWidgets import QLabel
+        dlg = None
+        for d in dialogs:
+            for lbl in d.findChildren(QLabel):
+                if lbl.objectName() == "qrShareImage" and lbl.pixmap() \
+                        and not lbl.pixmap().isNull():
+                    dlg = d
+                    break
+            if dlg is not None:
+                break
         check("GUI: QR dialog is non-modal (can stay open with PDF)",
-              not dialogs[0].isModal())
+              dlg is not None and not dlg.isModal())
+        # Quiet-zone preservation: the qrShareImage QLabel must match
+        # the pixmap size exactly so Qt doesn't auto-scale the QR
+        # (which would clip the quiet zone). We also assert the
+        # label has no QSS padding (which would clip the QR's white
+        # border once the pixmap is drawn into the label rect).
+        qr_label = None
+        if dlg is not None:
+            for lbl in dlg.findChildren(QLabel):
+                if lbl.objectName() == "qrShareImage":
+                    qr_label = lbl
+                    break
+        check("GUI: QR dialog has a #qrShareImage QLabel",
+              qr_label is not None)
+        if qr_label is not None:
+            pix = qr_label.pixmap()
+            check("GUI: QR label preserves native pixmap size "
+                  "(no auto-scale → quiet zone stays intact)",
+                  pix is not None and not pix.isNull()
+                  and qr_label.size() == pix.size(),
+                  f"label={qr_label.size()} pix={pix.size() if pix else None}")
+            # The CSS rule on qrShareImage has no padding — verify via
+            # the resolved stylesheet.
+            qss = qr_label.styleSheet()
+            check("GUI: QR label stylesheet has no padding (quiet zone intact)",
+                  "padding" not in qss.lower(),
+                  f"qss={qss!r}")
         # Close dialog to clean up
         for d in dialogs:
             d.close()

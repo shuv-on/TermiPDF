@@ -470,8 +470,11 @@ class TermiPDFWindow(QMainWindow):
         self._add_toolbar_button(tb, "clear", "Clear terminal", None,
                                   lambda: self.terminal.clear_output())
         self._add_toolbar_button(tb, "screenshot",
-                                  "Region screenshot (invokes gnome-screenshot, etc.)",
-                                  "Ctrl+Shift+S", self._action_screenshot_region)
+                                  "Screenshot current page (Ctrl+Shift+S)",
+                                  "Ctrl+Shift+S", self._action_screenshot)
+        self._add_toolbar_button(tb, "screenshot-region",
+                                  "Region screenshot (OS tool)",
+                                  None, self._action_screenshot_region)
         self._add_toolbar_button(tb, "rotate", "Rotate current page 90° (Ctrl+R)",
                                   "Ctrl+R", self._action_rotate)
 
@@ -499,8 +502,14 @@ class TermiPDFWindow(QMainWindow):
         btn = QToolButton(tb)
         btn.setIcon(IconFactory.get(icon_name, 20))
         btn.setToolTip(f"{tooltip}  ({shortcut})" if shortcut else tooltip)
-        if shortcut:
-            btn.setShortcut(shortcut)
+        # NB: we deliberately do NOT call btn.setShortcut(shortcut) here
+        # because for the common shortcuts (Ctrl+S, Ctrl+J, Ctrl+O, …)
+        # the QAction in the menu bar already owns the binding via
+        # QKeySequence.StandardKey. Setting the shortcut on the toolbar
+        # button too creates a duplicate QAction that fires the same
+        # slot, and Qt prints "QAction::event: Ambiguous shortcut
+        # overload" warnings at startup. The shortcut is shown in the
+        # tooltip so the user still sees the binding.
         if checkable:
             btn.setCheckable(True)
             self._tool_buttons[icon_name] = btn
@@ -693,7 +702,8 @@ class TermiPDFWindow(QMainWindow):
                 pass
         self._router = CanvasEventRouter(
             self.engine, self.annot, self.pdf_viewer,
-            undo_stack=self.undo_stack)
+            undo_stack=self.undo_stack,
+            editor=self.editor)
         # Re-attach engine to the active viewer.
         self.pdf_viewer.attach_engine(self.engine)
         # Refresh TOC + thumbs to reflect the active engine.
@@ -832,7 +842,8 @@ class TermiPDFWindow(QMainWindow):
 
         # Canvas ↔ annotator (router is rebuilt on tab switch)
         self._router = CanvasEventRouter(self.engine, self.annot, self.pdf_viewer,
-                                         undo_stack=self.undo_stack)
+                                         undo_stack=self.undo_stack,
+                                         editor=self.editor)
 
         # TOC → navigation
         self.toc.navigate_requested.connect(self._on_toc_navigate)
@@ -869,8 +880,10 @@ class TermiPDFWindow(QMainWindow):
 
     def _wire_shortcuts(self):
         """Bind Ctrl+J / Ctrl+T / F11 / Ctrl+0 etc."""
-        # Ctrl+J → toggle terminal (already in menu, but also bind here)
-        QShortcut(QKeySequence("Ctrl+J"), self, activated=self.toggle_terminal)
+        # Ctrl+J → toggle terminal (already in menu; we don't bind
+        # another QShortcut here because the menu's QAction already
+        # owns the binding — registering a second one causes Qt's
+        # "Ambiguous shortcut overload" warning at startup).
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.toggle_terminal)
         QShortcut(QKeySequence("Ctrl+`"), self, activated=self.toggle_terminal)
         QShortcut(QKeySequence("F11"), self, activated=self._action_fullscreen)
@@ -879,6 +892,19 @@ class TermiPDFWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+H"), self, activated=self._toggle_chrome_pinned)
         QShortcut(QKeySequence("PageDown"), self, activated=self._on_pgdn)
         QShortcut(QKeySequence("PageUp"), self, activated=self._on_pgup)
+        # Arrow keys: Right/Left for next/prev page, Up/Down for the
+        # same (so users with keyboards that have no dedicated
+        # PageUp/PageDown can still navigate). All four are guarded by
+        # "no terminal focus" in _on_pgdn/_on_pgup so the user can
+        # type arrow keys into the command line without jumping pages.
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self,
+                  activated=self._on_pgdn)
+        QShortcut(QKeySequence(Qt.Key.Key_Left), self,
+                  activated=self._on_pgup)
+        QShortcut(QKeySequence(Qt.Key.Key_Down), self,
+                  activated=self._on_pgdn)
+        QShortcut(QKeySequence(Qt.Key.Key_Up), self,
+                  activated=self._on_pgup)
         QShortcut(QKeySequence("Home"), self,
                   activated=lambda: self._render_result(self._cmd_goto(["1"])))
         QShortcut(QKeySequence("End"), self,
@@ -2667,6 +2693,23 @@ class TermiPDFWindow(QMainWindow):
     # Close
     # ====================================================================
     def closeEvent(self, event: QCloseEvent):
+        # If the document has unsaved edits (drawings, highlights,
+        # text inserts, etc.), prompt the user with save/discard/cancel
+        # before letting the close land. We check undo_stack.is_dirty()
+        # if available; otherwise we treat an open PDF as potentially
+        # dirty and ask anyway — better to over-prompt than to lose
+        # the user's edits.
+        if self.engine.is_open and self._doc_has_unsaved_edits():
+            ans = self._prompt_save_on_close()
+            if ans == "cancel":
+                event.ignore()
+                return
+            if ans == "save":
+                saved = self._save_current_doc()
+                if not saved:
+                    # User cancelled the save dialog → don't quit.
+                    event.ignore()
+                    return
         # Block on any in-flight annotation save so we don't quit while
         # a PDF is half-written.
         if hasattr(self, "_router") and self._router is not None:
@@ -2677,6 +2720,81 @@ class TermiPDFWindow(QMainWindow):
         if self.engine.is_open:
             self.engine.close()
         super().closeEvent(event)
+
+    # -------------------------------------------------- save-on-close helpers
+    def _doc_has_unsaved_edits(self) -> bool:
+        """True if any session has a dirty undo stack.
+
+        The undo stack tracks every drawing / highlight / erase /
+        text-insert / shape the user has applied since the last save
+        (or since the PDF was opened if never saved). We also treat
+        any in-place page mutation (swap, delete, rotate via the
+        Pages Manager) as "dirty" because those write to disk
+        directly — there's nothing to save in that case, but the
+        file has already been modified.
+        """
+        for sess in getattr(self, "_sessions", []):
+            stack = sess.get("undo_stack")
+            if stack is not None:
+                try:
+                    if stack.is_dirty():
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    def _prompt_save_on_close(self) -> str:
+        """Show the standard 3-button dialog: Save / Discard / Cancel.
+
+        Returns 'save', 'discard', or 'cancel'. The dialog also tells
+        the user which file is unsaved so they don't accidentally
+        discard edits to the wrong doc when several tabs are open.
+        """
+        # Find the active session's path (or first dirty one).
+        dirty_paths: list[str] = []
+        for sess in getattr(self, "_sessions", []):
+            stack = sess.get("undo_stack")
+            if stack is not None:
+                try:
+                    if stack.is_dirty() and sess.get("path"):
+                        dirty_paths.append(os.path.basename(str(sess["path"])))
+                except Exception:
+                    pass
+        if not dirty_paths:
+            # No specific file flagged — use the active engine's path.
+            if self.engine.path:
+                dirty_paths.append(os.path.basename(self.engine.path))
+        files_txt = ", ".join(f"'{p}'" for p in dirty_paths) if dirty_paths else "this document"
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("Unsaved changes")
+        msg.setText(
+            f"You have unsaved edits in {files_txt}.\n\n"
+            "Save before closing?"
+        )
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel
+        )
+        msg.setDefaultButton(QMessageBox.StandardButton.Save)
+        ret = msg.exec()
+        if ret == QMessageBox.StandardButton.Save:
+            return "save"
+        if ret == QMessageBox.StandardButton.Discard:
+            return "discard"
+        return "cancel"
+
+    def _save_current_doc(self) -> bool:
+        """Save the currently-focused session's annotations into its PDF.
+
+        Returns True if the save completed (or the user picked "Save As"
+        and chose a path), False if the user cancelled the file dialog.
+        Mirrors the File → Save menu behavior.
+        """
+        if not self.engine.is_open or not self.engine.path:
+            return True   # nothing to save
+        return bool(self._save_as_dialog())
 
 
 # =====================================================================

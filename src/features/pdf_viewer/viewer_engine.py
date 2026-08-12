@@ -95,7 +95,13 @@ class ViewerEngine:
             except Exception:
                 pass
         self.doc = None
-        self.path = None
+        # NOTE: we intentionally KEEP self.path here so reload_from_disk()
+        # can re-open the same file after an external mutation (e.g. a
+        # PDFManipulator.swap_pages/rotate/delete round-trip from the
+        # Pages Manager). Previously close() set path=None which made
+        # reload_from_disk return 'No path to reload' and left the
+        # engine empty — the viewer would then show the old pages even
+        # though the file on disk had changed.
         self.current_page = 0
         self.invalidate_render_cache()
 
