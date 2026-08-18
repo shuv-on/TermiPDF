@@ -29,18 +29,25 @@ from typing import List, Optional, Sequence
 import fitz
 
 from PyQt6.QtCore import (
-    Qt, pyqtSignal, QSize, QPoint, QMimeData, QByteArray, QDataStream,
-    QIODevice, QThread, QObject,
+    Qt, pyqtSignal, QSize, QPoint, QThread, QObject, QPropertyAnimation,
+    QEasingCurve, QAbstractAnimation, QRect, QTimer,
+    QParallelAnimationGroup,
 )
-from PyQt6.QtGui import QPixmap, QImage, QDrag, QAction, QIcon, QColor, QBrush
+from PyQt6.QtGui import (
+    QPixmap, QImage, QAction, QIcon, QColor, QBrush, QPen, QPainter,
+)
 from PyQt6.QtWidgets import (
-    QDialog, QListWidget, QListWidgetItem, QAbstractItemView,
+    QDialog, QListWidget, QListWidgetItem, QAbstractItemView, QStyle,
     QMenu, QFileDialog, QMessageBox, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QApplication,
+    QPushButton, QApplication, QSpinBox, QButtonGroup,
+    QRadioButton, QDialogButtonBox,
 )
 
 from features.pdf_viewer.viewer_engine import ViewerEngine
 from features.pdf_editor.manipulation import PDFManipulator
+from features.pdf_viewer.pages_manager_dragdrop import (
+    ImprovedPageGrid, make_improved_grid,
+)
 
 
 # Tile size used by the grid. The grid is responsive — the column count
@@ -51,9 +58,20 @@ GRID_COLUMNS_MIN = 2
 GRID_COLUMNS_MAX = 8
 
 
-# Drag-and-drop payload — we encode the source page indices as a byte
-# array so the receiver can re-create the page list.
-_MIME_TYPE = "application/x-termipdf-pages"
+# Swap-animation palette. The ghost overlay uses a translucent amber
+# fill so the moving tile stands out against the dark grid background
+# without obscuring the destination slot's preview.
+_SWAP_FILL     = "rgba(255, 235, 59, 0.85)"
+_SWAP_BORDER   = "#f59e0b"
+_SWAP_HIGHLIGHT = QColor(255, 235, 59, 90)
+_SWAP_DURATION_MS = 420
+
+
+# Drag-hover palette + MIME constants live in
+# ``pages_manager_dragdrop.py`` (where the ImprovedPageGrid is
+# implemented). This file used to carry its own copies; removing
+# them keeps the two implementations of drag-drop UI in sync via a
+# single source of truth.
 
 
 def _placeholder_tile(w: int, h: int, text: str = "…",
@@ -84,6 +102,135 @@ def _placeholder_tile(w: int, h: int, text: str = "…",
     finally:
         p.end()
     return pm
+
+
+class MoveToDialog(QDialog):
+    """Small "Move Page To…" dialog launched from the Pages Manager.
+
+    Lets the user pick a 1-based target page number and choose whether
+    to land ``before`` it or ``after`` it. The Apply button is disabled
+    until the input parses as an integer in [1, page_count] (with the
+    additional restriction that ``target == source`` is forbidden, but
+    that's enforced by the caller since this dialog is reusable).
+
+    The dialog is intentionally compact (fixed size, no resize grip)
+    so it feels like a pop-over rather than a modal window, matching
+    the lightweight "explicit repositioning" workflow in the spec.
+    """
+
+    # Emitted when the user clicks Apply: (src_page_1based, target_page_1based, position)
+    # where position is "before" or "after". The dialog closes itself
+    # before emitting so the receiver sees a hidden dialog.
+    move_requested = pyqtSignal(int, int, str)
+
+    def __init__(self, parent: QDialog, src_page_1based: int,
+                 page_count: int):
+        super().__init__(parent)
+        self._src_page = src_page_1based
+        self._page_count = page_count
+        self.setWindowTitle("Move Page To…")
+        # Non-resizable pop-over feel — fixed size, no help button.
+        self.setWindowFlags(self.windowFlags()
+                            & ~Qt.WindowType.WindowContextHelpButtonHint)
+        self.setModal(True)
+        self.setMinimumWidth(320)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
+
+        intro = QLabel(
+            f"Move <b>Page {self._src_page}</b> to a new position in the "
+            f"document. Pick a target page and choose whether Page "
+            f"{self._src_page} should land <i>before</i> it or <i>after</i> it.")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        # --- Target page input -----------------------------------------
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Target page:"))
+        self._spin = QSpinBox(self)
+        self._spin.setRange(1, self._page_count)
+        # Default to the next page (or the last page if we are at the
+        # end of the doc), which is the natural follow-up move.
+        default = min(self._src_page + 1, self._page_count)
+        if default == self._src_page and self._src_page > 1:
+            default = self._src_page - 1
+        self._spin.setValue(default)
+        self._spin.setObjectName("moveToTargetSpin")
+        row.addWidget(self._spin, 1)
+        row.addWidget(QLabel(f"/ {self._page_count}"))
+        root.addLayout(row)
+
+        # --- Position toggle (Before / After) --------------------------
+        pos_row = QHBoxLayout()
+        pos_row.addWidget(QLabel("Position:"))
+        self._btn_group = QButtonGroup(self)
+        self._rb_before = QRadioButton("Before target")
+        self._rb_after = QRadioButton("After target")
+        self._btn_group.addButton(self._rb_before, 0)
+        self._btn_group.addButton(self._rb_after, 1)
+        # Default to "Before" — matching the spec's example syntax
+        # ("reorder p-5 b p-2").
+        self._rb_before.setChecked(True)
+        pos_row.addWidget(self._rb_before)
+        pos_row.addWidget(self._rb_after)
+        pos_row.addStretch(1)
+        root.addLayout(pos_row)
+
+        # --- Apply / Cancel --------------------------------------------
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=self)
+        # Wire the standard Apply/Cancel to our own handlers so the
+        # dialog closes cleanly with the conventional Accept/Reject
+        # return values (in addition to emitting move_requested on
+        # success).
+        self._apply_btn = buttons.button(
+            QDialogButtonBox.StandardButton.Apply)
+        self._apply_btn.setObjectName("moveToApplyBtn")
+        self._apply_btn.setText("Apply")
+        self._apply_btn.setDefault(True)
+        # BUG FIX: ``QDialogButtonBox.accepted`` only fires for OK/
+        # Yes buttons; the Apply button is a third category and
+        # silently does NOTHING on click if you rely on `accepted`
+        # alone — meaning the grid/document never update because
+        # ``move_requested`` is never emitted. Wire Apply's own
+        # ``clicked`` signal directly so this is impossible to
+        # accidentally regress.
+        self._apply_btn.clicked.connect(self._on_apply)
+        # Cancel is fine via the standard ``rejected`` because it maps
+        # to the same slot regardless of which button (Close/Cancel/
+        # Cancel-all) the user activates.
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _on_apply(self):
+        """Validate, emit move_requested, and close the dialog.
+
+        Connected to the Apply button's ``clicked`` signal — NOT to
+        ``QDialogButtonBox.accepted`` — so the grid + document always
+        update when the user submits the dialog (the original code
+        relied on ``accepted`` which silently never fires for the
+        Apply button on several Qt versions, leaving the document
+        state stale).
+        """
+        target = int(self._spin.value())
+        if target == self._src_page:
+            QMessageBox.warning(
+                self, "Same page",
+                f"Page {self._src_page} is already at that position; "
+                f"choose a different target page.")
+            return
+        position = ("before" if self._btn_group.checkedId() == 0
+                    else "after")
+        # Emit FIRST (so the parent can react with animation), then
+        # close with Accepted so the dialog properly tears down.
+        self.move_requested.emit(self._src_page, target, position)
+        self.accept()
 
 
 # ------------------------------------------------- background thumbnailer
@@ -133,167 +280,6 @@ class _ThumbnailWorker(QObject):
             pass
         finally:
             self.finished.emit()
-
-
-class _PageGrid(QListWidget):
-    """QListWidget with custom drag-drop so we can drop a tile onto
-    another tile to MOVE that page to the drop target's position in
-    the document, OR drop external PDF files from the OS file
-    manager to merge them into the current document. Standard
-    QListWidget's internal drag moves items within the same widget,
-    which isn't what we want for PDF pages."""
-
-    # (target_1based, src_1based_list) — emitted for the "merge into a
-    # new PDF" flow, kept around in case future code wants it. Currently
-    # only the single-page reorder (page_moved) is wired up.
-    pages_dropped_on_target = pyqtSignal(int, list)
-    # Emitted when external .pdf files (from OS file manager) are
-    # dropped onto the grid. Carries a list of absolute file paths.
-    external_pdfs_dropped = pyqtSignal(list)
-    # Emitted for the simple single-page reorder: drop src_page_1based
-    # onto target_page_1based → src_page moves to target's position.
-    page_moved = pyqtSignal(int, int)  # (src_1based, target_1based)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-
-    def selected_pages_1based(self) -> List[int]:
-        pages: List[int] = []
-        for item in self.selectedItems():
-            idx = item.data(Qt.ItemDataRole.UserRole)
-            if idx is not None:
-                pages.append(int(idx) + 1)
-        return sorted(set(pages))
-
-    def startDrag(self, supportedActions):
-        indices = self.selected_pages_1based()
-        if not indices:
-            return
-        data = QByteArray()
-        stream = QDataStream(data, QIODevice.OpenModeFlag.WriteOnly)
-        stream.writeUInt32(len(indices))
-        for p in indices:
-            stream.writeUInt32(p)
-        mime = QMimeData()
-        mime.setData(_MIME_TYPE, data)
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        # Visual drag feedback: show the source tile's pixmap (or the
-        # first selected tile's pixmap) at 0.6× opacity so the user
-        # sees what they're dragging. Without this the default
-        # platform drag cursor looks empty on a static grid.
-        src_items = [self.item(p - 1) for p in indices if self.item(p - 1)]
-        if src_items and not src_items[0].icon().isNull():
-            pm = src_items[0].icon().pixmap(TILE_W - 24, TILE_H - 50)
-            if not pm.isNull():
-                drag.setPixmap(pm)
-                drag.setHotSpot(QPoint(pm.width() // 2, pm.height() // 2))
-        drag.exec(Qt.DropAction.CopyAction, Qt.DropAction.CopyAction)
-
-    def dragEnterEvent(self, event):
-        md = event.mimeData()
-        # Accept either our internal pages-payload OR external file URLs.
-        if md.hasFormat(_MIME_TYPE) or md.hasUrls():
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        md = event.mimeData()
-        if md.hasFormat(_MIME_TYPE) or md.hasUrls():
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def _external_pdf_paths(self, mime) -> List[str]:
-        """Filter the drop's URLs down to local .pdf files that exist."""
-        if not mime.hasUrls():
-            return []
-        paths: List[str] = []
-        for url in mime.urls():
-            if not url.isLocalFile():
-                continue
-            p = url.toLocalFile()
-            if p and p.lower().endswith(".pdf") and os.path.isfile(p):
-                paths.append(p)
-        return paths
-
-    def _target_page_from_pos(self, pos) -> Optional[int]:
-        """Resolve the 1-based target page for a drop at ``pos``.
-
-        If the cursor is over a tile, use that tile's page. If the
-        cursor is on the empty grid area (not on a tile), pick the
-        nearest tile by center distance — so the user can drop into
-        empty space between tiles and the page still moves to a
-        sensible position.
-        """
-        item = self.itemAt(pos)
-        if item is not None:
-            data = item.data(Qt.ItemDataRole.UserRole)
-            if data is not None:
-                return int(data) + 1
-        # Empty space: snap to the nearest tile by center distance.
-        items = [self.item(i) for i in range(self.count())]
-        items = [it for it in items if it is not None]
-        if not items:
-            return None
-        best = None
-        best_d = float("inf")
-        for it in items:
-            r = self.visualItemRect(it)
-            cx = r.center().x()
-            cy = r.center().y()
-            d = (cx - pos.x()) ** 2 + (cy - pos.y()) ** 2
-            if d < best_d:
-                best_d = d
-                best = it
-        if best is None:
-            return None
-        data = best.data(Qt.ItemDataRole.UserRole)
-        return int(data) + 1 if data is not None else None
-
-    def dropEvent(self, event):
-        md = event.mimeData()
-        # External file drop (from OS file manager) → defer to the
-        # dialog, which knows about the engine + dialog state. We only
-        # act when the drop contains local PDF files.
-        if md.hasUrls() and not md.hasFormat(_MIME_TYPE):
-            paths = self._external_pdf_paths(md)
-            if paths:
-                event.acceptProposedAction()
-                self.external_pdfs_dropped.emit(paths)
-                return
-            event.ignore()
-            return
-        # Internal tile-drop → page reorder. Dragging page A onto page B
-        # (or into the empty space near B) means "move page A to where
-        # page B sits now."
-        if not md.hasFormat(_MIME_TYPE):
-            super().dropEvent(event)
-            return
-        target_page_1based = self._target_page_from_pos(event.position().toPoint())
-        if target_page_1based is None:
-            event.ignore()
-            return
-        data = md.data(_MIME_TYPE)
-        stream = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
-        count = stream.readUInt32()
-        src = [stream.readUInt32() for _ in range(count)]
-        event.acceptProposedAction()
-        if not src:
-            return
-        # Single-source case: emit page_moved so the dialog can reorder
-        # the document inline. Multi-source case is rare and the merge
-        # flow handles it via pages_dropped_on_target.
-        if len(src) == 1:
-            self.page_moved.emit(src[0], target_page_1based)
-        else:
-            self.pages_dropped_on_target.emit(target_page_1based, src)
 
 
 class PagesManager(QDialog):
@@ -363,6 +349,13 @@ class PagesManager(QDialog):
         self._btn_rotate.clicked.connect(lambda: self._action_rotate_selected(90))
         bar.addWidget(self._btn_rotate)
 
+        self._btn_reorder = QPushButton("Reorder Page…")
+        self._btn_reorder.setToolTip(
+            "Move a selected page to a relative position before/after "
+            "another page (same as the terminal 'reorder' command).")
+        self._btn_reorder.clicked.connect(self._action_reorder_selected)
+        bar.addWidget(self._btn_reorder)
+
         self._btn_refresh = QPushButton("Refresh")
         self._btn_refresh.setToolTip("Re-render the grid (e.g. after editing).")
         self._btn_refresh.clicked.connect(self._populate)
@@ -374,20 +367,18 @@ class PagesManager(QDialog):
 
         root.addLayout(bar)
 
-        # Grid of thumbnails via our custom QListWidget subclass.
-        self.list = _PageGrid()
-        self.list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.list.setIconSize(QSize(TILE_W - 24, TILE_H - 50))
-        self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.list.setMovement(QListWidget.Movement.Static)
-        self.list.setSpacing(8)
-        self.list.setUniformItemSizes(True)
-        # IMPORTANT: setMovement(Static) silently downgrades the grid's
-        # drag-drop mode from DragDrop to DropOnly, killing the
-        # drag-from-tile flow. Re-apply after the view-mode/movement
-        # setters so the grid actually starts a QDrag on mousedown.
-        self.list.setDragEnabled(True)
-        self.list.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        # Grid of thumbnails. We use ``ImprovedPageGrid`` (a self-contained
+        # ``QListWidget`` subclass) instead of the in-file ``_PageGrid``
+        # because the latter's ``startDrag`` override is not reliably
+        # invoked under PyQt 6.10+ — meaning the on-disk PDF was never
+        # being reordered when the user dragged a tile. ``ImprovedPageGrid``
+        # hooks ``dropMimeData`` (a public Qt virtual that IS called) and
+        # uses ``reorder_callback`` to persist the swap via the same
+        # ``PDFManipulator.swap_pages`` primitive the terminal uses.
+        self.list = make_improved_grid(TILE_W, TILE_H)
+        # Wire the reorder callback BEFORE we add any tiles so a drop on
+        # an already-populated grid can find the engine path.
+        self.list.reorder_callback = self._dragdrop_reorder
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._on_context_menu)
         self.list.itemActivated.connect(self._on_item_activated)
@@ -645,6 +636,28 @@ class PagesManager(QDialog):
         else:
             QMessageBox.warning(self, "Merge failed", msg)
 
+    def _dragdrop_reorder(self, src_page_1based: int,
+                          target_page_1based: int) -> tuple[bool, str]:
+        """Reorder callback registered with ``ImprovedPageGrid``.
+
+        Just validates the request — the actual swap is dispatched via
+        ``ImprovedPageGrid``'s ``page_moved`` signal, which is wired
+        to ``_on_page_moved`` (animation + on-disk commit + reload +
+        ``pages_swapped`` / ``pages_reordered`` emit). We do NOT call
+        ``_on_page_moved`` from here: the signal handler does it once.
+        """
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return False, "No PDF open."
+        if src_page_1based == target_page_1based:
+            return True, "Same page — no swap."
+        try:
+            n = self.engine.page_count
+        except Exception:
+            return False, "Engine not loaded."
+        if target_page_1based < 1 or target_page_1based > n:
+            return False, f"Target page {target_page_1based} out of range (1..{n})."
+        return True, "Validated — page_moved signal will dispatch."
+
     def _on_page_moved(self, src_page_1based: int, target_page_1based: int):
         """User dragged a tile onto another tile — SWAP the two pages.
 
@@ -658,6 +671,167 @@ class PagesManager(QDialog):
             return
         if src_page_1based == target_page_1based:
             return  # no-op — the user dropped a tile onto itself
+        # ---- in-memory grid mutation (spec: instant visual feedback) ---
+        # The spec requires the underlying page order to flip
+        # immediately so the thumbnail labels track the new sequence
+        # the moment the drop commits. We do this by popping the
+        # source item out of the list widget and re-inserting it at
+        # the target row, then emitting the model's ``layoutChanged``
+        # so every observer re-binds row ↔ label.
+        self._swap_tiles_in_memory(src_page_1based, target_page_1based)
+        # Then run the animation + on-disk swap so the change persists
+        # after the dialog closes.
+        self._animate_swap_then_apply(src_page_1based, target_page_1based)
+
+    def _swap_tiles_in_memory(self, src_page_1based: int,
+                               target_page_1based: int) -> None:
+        """Apply the spec's in-memory swap pattern: take the source item,
+        re-insert it at the target row, then rebind row → label so the
+        new sequence is visible before the on-disk write completes.
+
+        ``pages.insert(target, pages.pop(source))`` is the textbook
+        rewrite and we model it on the underlying ``QListWidgetItem``
+        model so the existing repopulate path is left alone.
+        """
+        src_row = src_page_1based - 1
+        tgt_row = target_page_1based - 1
+        if src_row == tgt_row:
+            return
+        src_item = self.list.item(src_row)
+        if src_item is None:
+            return
+        # `takeItem` removes + transfers ownership; we keep the
+        # reference so the widget isn't garbage-collected.
+        taken = self.list.takeItem(src_row)
+        if taken is None:
+            return
+        # Clamp the insert row against the new (post-removal) count.
+        insert_row = max(0, min(tgt_row, self.list.count()))
+        self.list.insertItem(insert_row, taken)
+        # Update every tile's stored page-index so future drag-move
+        # operations operate on the correct underlying page (and the
+        # labels track the new sequence).
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            if it is not None:
+                it.setData(Qt.ItemDataRole.UserRole, i)
+                it.setText(f"Page {i + 1}")
+        # Notify the underlying model so any other attached view
+        # repaints with the new row order.
+        try:
+            m = self.list.model()
+            if m is not None:
+                m.layoutChanged.emit()
+        except Exception:
+            pass
+        try:
+            self.list.viewport().update()
+        except Exception:
+            pass
+
+    def _animate_swap_then_apply(self, src_page_1based: int,
+                                 target_page_1based: int):
+        """Run a brief cross-fade overlay, then commit the swap on disk
+        and repopulate the grid.
+
+        Two translucent "ghost" labels carrying each tile's pixmap
+        float over the grid and animate to the *other* tile's slot,
+        so the user sees the swap happening in real time. After the
+        animation finishes we tear down the ghosts, run the on-disk
+        swap, reload the engine, repopulate, and emit the usual
+        pages_swapped / pages_reordered signals.
+        """
+        src_idx = src_page_1based - 1
+        tgt_idx = target_page_1based - 1
+        src_item = self.list.item(src_idx)
+        tgt_item = self.list.item(tgt_idx)
+        if src_item is None or tgt_item is None:
+            self._finalize_swap(src_page_1based, target_page_1based)
+            return
+        # visualItemRect returns coordinates in the *viewport* frame;
+        # child widgets of self.list sit in the list widget's frame, so
+        # translate by the viewport's position inside the list.
+        vp_origin = self.list.viewport().mapTo(self.list, QPoint(0, 0))
+        src_rect = QRect(self.list.visualItemRect(src_item).topLeft() + vp_origin,
+                         self.list.visualItemRect(src_item).size())
+        tgt_rect = QRect(self.list.visualItemRect(tgt_item).topLeft() + vp_origin,
+                         self.list.visualItemRect(tgt_item).size())
+
+        ghost_src = self._make_swap_ghost(src_item, src_rect)
+        ghost_tgt = self._make_swap_ghost(tgt_item, tgt_rect)
+        if ghost_src is None or ghost_tgt is None:
+            self._finalize_swap(src_page_1based, target_page_1based)
+            return
+
+        # Each ghost moves to the OTHER tile's slot while fading out,
+        # so the underlying list item at the destination becomes
+        # visible underneath. Group the animations so the cleanup
+        # callback fires exactly once regardless of which anim finishes
+        # first (or if any is interrupted).
+        def _geom(target, start, end):
+            a = QPropertyAnimation(target, b"geometry", self)
+            a.setDuration(_SWAP_DURATION_MS)
+            a.setStartValue(start)
+            a.setEndValue(end)
+            a.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            return a
+
+        def _fade(target):
+            a = QPropertyAnimation(target, b"windowOpacity", self)
+            a.setDuration(_SWAP_DURATION_MS)
+            a.setStartValue(1.0)
+            a.setEndValue(0.0)
+            return a
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(_geom(ghost_src, src_rect,
+                                 QRect(tgt_rect.topLeft(), src_rect.size())))
+        group.addAnimation(_geom(ghost_tgt, tgt_rect,
+                                 QRect(src_rect.topLeft(), tgt_rect.size())))
+        group.addAnimation(_fade(ghost_src))
+        group.addAnimation(_fade(ghost_tgt))
+        # Capture ghosts in the closure so the teardown callback can
+        # dispose of them without keeping state on self.
+        ghosts = (ghost_src, ghost_tgt)
+        group.finished.connect(
+            lambda: self._teardown_swap_ghosts(ghosts))
+        group.finished.connect(
+            lambda: self._finalize_swap(src_page_1based, target_page_1based))
+        group.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
+
+    def _make_swap_ghost(self, item: QListWidgetItem, at_rect: QRect) -> Optional[QLabel]:
+        """Build a translucent floating label carrying ``item``'s pixmap."""
+        pix = item.icon().pixmap(TILE_W - 24, TILE_H - 50)
+        lbl = QLabel(self.list)
+        lbl.setPixmap(pix)
+        lbl.setFixedSize(pix.size() if not pix.isNull()
+                         else QSize(TILE_W - 24, TILE_H - 50))
+        lbl.setStyleSheet(
+            f"background: {_SWAP_FILL};"
+            f"border: 2px solid {_SWAP_BORDER}; border-radius: 8px;")
+        lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        lbl.move(at_rect.topLeft())
+        lbl.show()
+        lbl.raise_()
+        return lbl
+
+    def _teardown_swap_ghosts(self, ghosts) -> None:
+        """Dispose of the swap-animation overlay labels."""
+        for g in ghosts:
+            try:
+                g.deleteLater()
+            except Exception:
+                pass
+
+    def _finalize_swap(self, src_page_1based: int, target_page_1based: int):
+        """Commit the swap on disk and repopulate the grid.
+
+        Called after the swap animation finishes (drag-and-drop path)
+        or directly when the swap is invoked from the terminal and no
+        animation is desired / possible.
+        """
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return
         ok, msg = PDFManipulator.swap_pages(
             self.engine.path, src_page_1based, target_page_1based)
         if not ok:
@@ -673,6 +847,12 @@ class PagesManager(QDialog):
                 self, "Reload failed",
                 f"Swap succeeded but reload failed: {exc}")
             return
+        # Repopulate the grid; this re-creates every item with a
+        # fresh "Page N" label that matches the new sequence position
+        # (because labels are derived from the item's row index in
+        # ``_populate``). The dialog then refreshes the engine's
+        # ``current_page`` pointer so subsequent saves/exports use
+        # the modified page order.
         self._populate()
         # Post-swap, the page that WAS at src is now at target, and
         # vice-versa. Emit both so the main window can decide what to
@@ -682,6 +862,194 @@ class PagesManager(QDialog):
         # downstream consumers that listen for any reorder; the "new
         # index" is target_page_1based for the source page.
         self.pages_reordered.emit(target_page_1based)
+
+    # ----------------------------------------------- terminal-driven swap
+    def animate_terminal_swap(self, src_page_1based: int,
+                              target_page_1based: int):
+        """Public entry-point used by the terminal ``swap`` command.
+
+        Triggers a live animation in the Page Manager UI (when this
+        dialog is open) so the user sees *which* pages are being
+        swapped in real time, then commits the swap on disk and
+        repopulates the grid. If the dialog is hidden / closed the
+        caller falls back to ``_finalize_swap`` directly so the
+        on-disk swap still goes through.
+        """
+        if src_page_1based == target_page_1based:
+            # No-op swap — still let the caller know we're done.
+            self.pages_swapped.emit(src_page_1based, target_page_1based)
+            return
+        if not self.isVisible():
+            self._finalize_swap(src_page_1based, target_page_1based)
+            return
+        self._highlight_tiles([src_page_1based, target_page_1based])
+        self._animate_swap_then_apply(src_page_1based, target_page_1based)
+
+    # ----------------------------------------------- terminal-driven move
+    def animate_terminal_move(self, src_page_1based: int,
+                              position: str,
+                              tgt_page_1based: int):
+        """Public entry-point used by the terminal ``reorder`` command.
+
+        ``position`` is either ``"before"`` or ``"after"``. The dialog
+        commits the move on disk (via ``PDFManipulator.move_page``),
+        reloads the engine, repopulates the grid, and emits
+        ``pages_reordered`` so the main viewer can follow the page to
+        its new slot. The Pages Manager dialog is itself already on
+        screen so the user sees the tile fly into its new slot as the
+        grid is rebuilt.
+        """
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return
+        if src_page_1based == tgt_page_1based:
+            # No-op — still let the caller know we're done.
+            self.pages_reordered.emit(src_page_1based)
+            return
+        if not self.isVisible():
+            # Caller (main window) falls back to the silent path.
+            self._finalize_move(src_page_1based, position, tgt_page_1based)
+            return
+        # Highlight the two involved tiles so the user can see which
+        # page is moving and where it is going.
+        self._highlight_tiles([src_page_1based, tgt_page_1based])
+        self._animate_move_then_apply(src_page_1based, position, tgt_page_1based)
+
+    def _animate_move_then_apply(self, src_page_1based: int,
+                                 position: str,
+                                 tgt_page_1based: int):
+        """Slide the source tile to its destination slot, then commit
+        the move on disk and repopulate.
+
+        Visually: we build a translucent floating ghost carrying the
+        source tile's pixmap and animate it from the source's slot to
+        either the target's slot (``before``) or one slot past it
+        (``after``). When the animation finishes we tear down the
+        ghost, run ``PDFManipulator.move_page``, reload the engine,
+        repopulate the grid, and emit ``pages_reordered`` carrying the
+        source page's NEW slot.
+        """
+        src_idx = src_page_1based - 1
+        tgt_idx = tgt_page_1based - 1
+        src_item = self.list.item(src_idx)
+        tgt_item = self.list.item(tgt_idx)
+        if src_item is None or tgt_item is None:
+            self._finalize_move(src_page_1based, position, tgt_page_1based)
+            return
+        vp_origin = self.list.viewport().mapTo(self.list, QPoint(0, 0))
+        src_rect = QRect(self.list.visualItemRect(src_item).topLeft() + vp_origin,
+                         self.list.visualItemRect(src_item).size())
+        tgt_rect = QRect(self.list.visualItemRect(tgt_item).topLeft() + vp_origin,
+                         self.list.visualItemRect(tgt_item).size())
+        ghost = self._make_swap_ghost(src_item, src_rect)
+        if ghost is None:
+            self._finalize_move(src_page_1based, position, tgt_page_1based)
+            return
+
+        # For "before" the ghost ends at the target's slot. For "after"
+        # we offset the end position by one tile-width to land just
+        # past the target. We can't easily read the next item's rect
+        # for "after" (it may have been removed from the live tree if
+        # the source was above the target), so we approximate by
+        # offsetting tgt_rect by a tile's column stride. The grid is
+        # left-to-right top-to-bottom; the next slot after tgt is
+        # either the next column to the right or the start of the next
+        # row — both land in roughly the same horizontal pixel as
+        # tgt_rect so a +TILE_W offset reads as "just past".
+        if position == "after":
+            end_rect = QRect(tgt_rect.topLeft() + QPoint(TILE_W, 0),
+                             src_rect.size())
+        else:
+            end_rect = QRect(tgt_rect.topLeft(), src_rect.size())
+
+        # Slide the ghost into place while fading it out so the
+        # underlying list item at the destination becomes visible
+        # underneath.
+        geom = QPropertyAnimation(ghost, b"geometry", self)
+        geom.setDuration(_SWAP_DURATION_MS)
+        geom.setStartValue(src_rect)
+        geom.setEndValue(end_rect)
+        geom.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        fade = QPropertyAnimation(ghost, b"windowOpacity", self)
+        fade.setDuration(_SWAP_DURATION_MS)
+        fade.setStartValue(1.0)
+        fade.setEndValue(0.0)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(geom)
+        group.addAnimation(fade)
+        # Capture the ghost in the closure so the teardown callback
+        # can dispose of it without keeping state on self.
+        ghosts = (ghost,)
+        group.finished.connect(
+            lambda: self._teardown_swap_ghosts(ghosts))
+        group.finished.connect(
+            lambda: self._finalize_move(src_page_1based, position,
+                                        tgt_page_1based))
+        group.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
+
+    def _finalize_move(self, src_page_1based: int,
+                       position: str,
+                       tgt_page_1based: int):
+        """Commit the move on disk and repopulate the grid.
+
+        Called after the move animation finishes (terminal ``reorder``
+        path) or directly when no animation is desired / possible.
+        Emits ``pages_reordered`` carrying the source page's new
+        1-based slot so the main viewer can follow it.
+        """
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return
+        n = self.engine.page_count
+        # Compute the post-removal slot (move_page() expects 1-based,
+        # post-removal indexing). See _cmd_reorder for the rationale.
+        target_slot = tgt_page_1based
+        if src_page_1based < tgt_page_1based:
+            target_slot = tgt_page_1based - 1
+        if position == "after":
+            target_slot += 1
+        target_slot = max(1, min(target_slot, n))
+        ok, msg = PDFManipulator.move_page(
+            self.engine.path, src_page_1based, target_slot)
+        if not ok:
+            QMessageBox.warning(self, "Reorder failed", msg)
+            return
+        try:
+            self.engine.reload_from_disk()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Reload failed",
+                f"Reorder succeeded but reload failed: {exc}")
+            return
+        # Repopulate so the grid labels and tile order match the new
+        # sequence (labels are derived from row index in _populate()).
+        self._populate()
+        # Emit pages_reordered with the source's NEW 1-based slot.
+        self.pages_reordered.emit(target_slot)
+
+    def _highlight_tiles(self, pages_1based: List[int]):
+        """Flash a coloured background on the given tiles so the user can
+        see which pages are involved in a swap.
+
+        The flash is restored after a short delay. If the swap's
+        animation triggers a repopulate() before the timer fires the
+        setBackground(None) calls become harmless no-ops on the new
+        (different) item objects.
+        """
+        for p in pages_1based:
+            it = self.list.item(p - 1)
+            if it is None:
+                continue
+            it.setBackground(QBrush(_SWAP_HIGHLIGHT))
+
+        def _restore():
+            for p in pages_1based:
+                it = self.list.item(p - 1)
+                if it is None:
+                    continue
+                it.setData(Qt.ItemDataRole.BackgroundRole, None)
+
+        QTimer.singleShot(700, _restore)
 
     def _on_external_pdfs_dropped(self, paths: List[str]):
         """User dropped external PDF files (from OS file manager) onto the grid.
@@ -736,17 +1104,39 @@ class PagesManager(QDialog):
             self.new_pdf_generated.emit(out_path)
 
     def _on_context_menu(self, pos: QPoint):
-        """Right-click menu — actions apply to current selection."""
+        """Right-click menu — actions apply to current selection.
+
+        For the per-page actions ("Move To…") the *target* of the
+        operation is the page that was right-clicked on, even if more
+        tiles were selected previously. This matches the way every
+        desktop file manager handles "move to…" — the operation pivots
+        on the right-clicked item.
+        """
         item = self.list.itemAt(pos)
-        if item is not None and not item.isSelected():
-            self.list.clearSelection()
-            item.setSelected(True)
+        right_clicked_page = None
+        if item is not None:
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data is not None:
+                right_clicked_page = int(data) + 1
+            if not item.isSelected():
+                # If nothing was selected, or the right-clicked tile
+                # wasn't part of the selection, treat just this tile
+                # as the selection so per-page actions are predictable.
+                self.list.clearSelection()
+                item.setSelected(True)
 
         menu = QMenu(self)
         has_sel = bool(self.get_selected_pages())
         a_new = menu.addAction("New PDF from selected pages…")
         a_new.triggered.connect(self._action_new_pdf)
         a_new.setEnabled(has_sel)
+        menu.addSeparator()
+        a_move = menu.addAction(
+            f"Move Page {right_clicked_page} To…"
+            if right_clicked_page else "Move To…")
+        a_move.triggered.connect(
+            lambda: self._action_move_to(right_clicked_page))
+        a_move.setEnabled(right_clicked_page is not None)
         menu.addSeparator()
         a_del = menu.addAction("Delete selected page(s)")
         a_del.triggered.connect(self._action_delete_selected)
@@ -813,6 +1203,49 @@ class PagesManager(QDialog):
                                     f"Failed to rotate page {p}.")
                 return
         self._populate()
+
+    def _action_reorder_selected(self):
+        """Toolbar 'Reorder Page…' button — opens the MoveToDialog for
+        the first selected page (or the current page if none selected).
+        """
+        if not self.engine or not self.engine.is_open:
+            return
+        pages = self.get_selected_pages()
+        if pages:
+            src_page = pages[0]
+        else:
+            # Fall back to the engine's current page if the user hasn't
+            # selected anything; this matches the behavior of the
+            # other toolbar buttons that operate on the current page.
+            src_page = (self.engine.current_page + 1
+                        if self.engine.current_page is not None else 1)
+        src_page = max(1, min(src_page, self.engine.page_count))
+        self._action_move_to(src_page)
+
+    def _action_move_to(self, src_page_1based):
+        """Shared entry point for the right-click 'Move To…' action and
+        the toolbar 'Reorder Page…' button. Pops the MoveToDialog and
+        routes the user-supplied (target, position) values through the
+        same animated path the terminal ``reorder`` command uses.
+        """
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return
+        if src_page_1based is None:
+            return
+        dlg = MoveToDialog(self, src_page_1based, self.engine.page_count)
+        # ``move_requested`` carries (src, target, position). Reuse the
+        # terminal-driven animation entry-point so the user sees the
+        # same live transition whether they triggered the move from
+        # the widget or the CLI.
+        dlg.move_requested.connect(self._on_move_to_dialog_apply)
+        dlg.exec()
+
+    def _on_move_to_dialog_apply(self, src_page_1based: int,
+                                 target_page_1based: int,
+                                 position: str):
+        """MoveToDialog.Apply -> animated move + repopulate."""
+        self.animate_terminal_move(src_page_1based, position,
+                                   target_page_1based)
 
     def _generate_new_pdf(self, pages_1based: List[int],
                           out_path: str) -> tuple[bool, str]:
