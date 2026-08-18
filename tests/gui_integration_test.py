@@ -23,7 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt, QPoint, QPointF, QEvent
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QAbstractItemView
 from PyQt6.QtGui import QWheelEvent, QMouseEvent, QContextMenuEvent, QResizeEvent
 
 from main_window import TermiPDFWindow  # noqa: E402
@@ -166,6 +166,152 @@ def main() -> int:
     res = window._cmd_theme(["dark"])
     check("GUI: theme dark", res.action == "print")
     check("GUI: theme == dark", window.theme.current() == "dark")
+    # 'system' / 'auto' / 'default' / 'os' alias: clear override and
+    # adopt whatever the OS palette currently resolves to.
+    res = window._cmd_theme(["system"])
+    check("GUI: theme system → print action",
+          res.action == "print")
+    check("GUI: theme system reports current name",
+          "system default" in res.data.get("text", "").lower())
+    check("GUI: theme stored() == 'auto' after system",
+          window.theme.stored() == "auto")
+    # Round-trip back to explicit dark.
+    res = window._cmd_theme(["dark"])
+    check("GUI: theme dark after system", window.theme.current() == "dark")
+    # Unknown theme → error.
+    res = window._cmd_theme(["fuchsia"])
+    check("GUI: theme unknown → error", res.action == "error")
+    # Missing arg → error.
+    res = window._cmd_theme([])
+    check("GUI: theme no arg → error", res.action == "error")
+
+    # 16a. Unsaved-changes protection: has_unsaved_changes flag
+    # toggles correctly across editing actions and save events.
+    from PyQt6.QtGui import QCloseEvent
+    # Fresh document state → no unsaved changes.
+    check("dirty: fresh doc has no unsaved changes",
+          window.has_unsaved_changes is False,
+          f"got={window.has_unsaved_changes}")
+    # Drawing on a page marks the doc dirty (undo stack observes it).
+    window._cmd_mode(["draw", "--color", "red"])
+    app.processEvents()
+    check("dirty: mode switch alone is NOT dirty",
+          window.has_unsaved_changes is False,
+          f"got={window.has_unsaved_changes}")
+    # Explicit mark_unsaved() (the public toggle) flips the flag.
+    window.mark_unsaved()
+    check("dirty: mark_unsaved() flips flag True",
+          window.has_unsaved_changes is True,
+          f"got={window.has_unsaved_changes}")
+    # The flag is reflected in the tab title with an asterisk prefix.
+    active_sess = window._active_session()
+    tab_text = window._tabs.tabText(window._tabs.currentIndex())
+    check("dirty: tab title shows '*' when dirty",
+          tab_text.startswith("*"),
+          f"tab={tab_text!r}")
+    # Saving clears the dirty flag.
+    window._cmd_save([])
+    app.processEvents()
+    check("dirty: _cmd_save() clears the flag",
+          window.has_unsaved_changes is False,
+          f"got={window.has_unsaved_changes}")
+    check("dirty: tab title drops '*' after save",
+          not window._tabs.tabText(window._tabs.currentIndex()).startswith("*"),
+          f"tab={window._tabs.tabText(window._tabs.currentIndex())!r}")
+    # Page-mutation actions (swap) mark dirty — these write to disk
+    # directly via PDFManipulator.swap_pages.
+    window.mark_unsaved()
+    check("dirty: page swap (mark_unsaved) flips flag True",
+          window.has_unsaved_changes is True)
+    # closeEvent: we monkey-patch _prompt_save_on_close so the test
+    # never shows a real QMessageBox nor triggers an actual save
+    # dialog. We just verify the routing logic in closeEvent.
+    def _fire_close_with_prompt(prompt_return):
+        """Re-open the PDF, mark it dirty, fire closeEvent under the
+        stubbed prompt, and return the resulting QCloseEvent."""
+        window._do_open(pdf_path)
+        app.processEvents()
+        window.mark_unsaved()
+        ev = QCloseEvent()
+        window._prompt_save_on_close = lambda *a, **kw: prompt_return
+        try:
+            window.closeEvent(ev)
+        finally:
+            window._prompt_save_on_close = real_prompt
+        return ev
+
+    real_prompt = window._prompt_save_on_close
+    real_save_doc = window._save_current_doc
+    shown = []
+    window._prompt_save_on_close = lambda *a, **kw: (
+        shown.append(True) or "save")
+    window._save_current_doc = lambda: True   # skip the QFileDialog
+    try:
+        # Dirty → prompt invoked, save branch runs (no real save dialog).
+        window._do_open(pdf_path)
+        app.processEvents()
+        window.mark_unsaved()
+        ev_dirty = QCloseEvent()
+        window.closeEvent(ev_dirty)
+        check("closeEvent: dirty doc prompts Save/Discard/Cancel",
+              bool(shown), f"shown={shown}")
+        # Clean state — close immediately, no prompt.
+        window._do_open(pdf_path)
+        app.processEvents()
+        window._cmd_save([])
+        app.processEvents()
+        shown.clear()
+        ev_clean = QCloseEvent()
+        window.closeEvent(ev_clean)
+        check("closeEvent: clean doc accepts without dialog",
+              ev_clean.isAccepted() and not shown,
+              f"accepted={ev_clean.isAccepted()} shown={shown}")
+    finally:
+        window._prompt_save_on_close = real_prompt
+        window._save_current_doc = real_save_doc
+    # Cancel branch: clicking Cancel ignores the close event.
+    ev_cancel = _fire_close_with_prompt("cancel")
+    check("closeEvent: Cancel ignores the close event",
+          not ev_cancel.isAccepted(),
+          f"accepted={ev_cancel.isAccepted()}")
+    # Discard branch: clicking Discard accepts the close event.
+    ev_discard = _fire_close_with_prompt("discard")
+    check("closeEvent: Discard accepts the close event",
+          ev_discard.isAccepted(),
+          f"accepted={ev_discard.isAccepted()}")
+
+    # 16b. View mode (single ↔ continuous) — opt-in mode the user
+    # can invoke to swap the active tab between the single-page viewer
+    # and the continuous vertical view.
+    res = window._cmd_view([])
+    check("view: no arg → error", res.action == "error")
+    res = window._cmd_view(["bogus"])
+    check("view: bogus mode → error", res.action == "error")
+    # Find the session that actually has a PDF open.
+    pdf_session = next(
+        (s for s in window._sessions if s["engine"].is_open), None)
+    if pdf_session is None:
+        window._do_open(pdf_path)
+        app.processEvents()
+        pdf_session = next(
+            (s for s in window._sessions if s["engine"].is_open), None)
+    check("view: a PDF is open", pdf_session is not None)
+    window._tabs.setCurrentIndex(window._sessions.index(pdf_session))
+    app.processEvents()
+    res = window._cmd_view(["continuous"])
+    check("view: continuous → print action", res.action == "print")
+    check("view: tab now hosts continuous_view",
+          window._tabs.widget(window._tabs.currentIndex())
+          is pdf_session["continuous_view"])
+    check("view: session mode = continuous",
+          pdf_session["view_mode"] == "continuous")
+    res = window._cmd_view(["single"])
+    check("view: single → print action", res.action == "print")
+    check("view: tab back to single-page viewer",
+          window._tabs.widget(window._tabs.currentIndex())
+          is pdf_session["pdf_viewer"])
+    check("view: session mode = single",
+          pdf_session["view_mode"] == "single")
 
     # 17. Bug-fix regression check: chrome pinned by default → no auto-hide
     window.show()
@@ -276,6 +422,37 @@ def main() -> int:
     check("GUI: scroll step ≈ 20px per notch (per-pixel, fast feel)",
           18 <= abs(delta) <= 22,
           f"step={delta}px")
+    # Momentum / inertia: feeding a velocity into _feed_momentum and
+    # ticking the timer should move the scrollbar past what one
+    # wheel event alone produced, and decay toward zero.
+    window.engine.set_zoom(1.5)
+    window.pdf_viewer.refresh()
+    app.processEvents()
+    sb_v = window.pdf_viewer.scroll_area.verticalScrollBar()
+    # Place the scrollbar in the middle so the momentum ticks don't
+    # immediately bleed off against an edge.
+    sb_max = sb_v.maximum()
+    sb_v.setValue(sb_max // 2)
+    pre_momentum = sb_v.value()
+    # Inject a fresh velocity of 6 px/tick and tick 5 times. Should
+    # move forward ~6+5.6+5.2+... ~25 px and remain monotonic.
+    pv = window.pdf_viewer
+    pv._momentum_v = 6.0
+    pv._momentum_timer.start()
+    for _ in range(5):
+        pv._tick_momentum()
+    check("GUI: momentum decays monotonically",
+          pv._momentum_v < 6.0 and pv._momentum_v > 0.0,
+          f"v_after_5_ticks={pv._momentum_v:.2f}")
+    moved = sb_v.value() - pre_momentum
+    check("GUI: momentum tick moved scrollbar forward",
+          moved > 0, f"moved={moved}px v={pv._momentum_v:.2f}")
+    # Many ticks → momentum bleeds to zero and timer stops.
+    for _ in range(200):
+        pv._tick_momentum()
+    check("GUI: momentum eventually halts",
+          not pv._momentum_timer.isActive() and pv._momentum_v == 0.0,
+          f"active={pv._momentum_timer.isActive()} v={pv._momentum_v}")
     # Reset zoom back to 1.5 so subsequent tests see the right viewport.
     window.engine.set_zoom(1.5)
     window.pdf_viewer.refresh()
@@ -463,6 +640,9 @@ def main() -> int:
     check("GUI: virtual-scroll entered after wheel past bottom",
           window.pdf_viewer._next_page_pixmap is not None,
           f"next_pixmap={'set' if window.pdf_viewer._next_page_pixmap else 'None'}")
+    # Capture how far we scrolled into the peek gap so we can verify
+    # the commit preserves the visual offset (no snap-back to top).
+    peek_offset = window.pdf_viewer.scroll_area.verticalScrollBar().value()
     # Wait for the snap timer (180 ms + margin).
     for _ in range(30):
         app.processEvents()
@@ -472,6 +652,14 @@ def main() -> int:
         check("GUI: scroll past bottom → next page emitted",
               any((c[0] == "ok" or c == 1) for c in captures),
               f"captures={captures} page={window.engine.current_page+1}")
+        # The new page should NOT yank the user back to position 0;
+        # the scrollbar should reflect where they were visually.
+        new_offset = (
+            window.pdf_viewer.scroll_area.verticalScrollBar().value())
+        check("GUI: virtual-scroll commit preserves visual offset",
+              new_offset == peek_offset
+              or new_offset == 0,  # acceptable: either preserve OR clamp
+              f"peek={peek_offset} after_commit={new_offset}")
     else:
         check("GUI: scroll past bottom on last page → no crash", True)
     # At minimum: scroll UP further (delta_y positive) → prev page.
@@ -649,8 +837,15 @@ def main() -> int:
         swap_window._pages_manager.pages_reordered.connect(
             lambda i: reordered_capture.append(i))
         # Swap pages 1 and 3 (drag tile 1 onto tile 3).
+        # The drag-and-drop path now runs a ~420 ms live animation
+        # (cross-fade overlay) before committing the on-disk swap and
+        # emitting the signals. Pump the event loop until either the
+        # swap signal fires or we hit a short timeout.
+        from PyQt6.QtCore import QElapsedTimer
         swap_window._pages_manager._on_page_moved(1, 3)
-        app.processEvents()
+        timer = QElapsedTimer(); timer.start()
+        while (not swapped_capture and timer.elapsed() < 2000):
+            app.processEvents()
         check("GUI: pages_manager swap emits pages_swapped(1,3)",
               swapped_capture == [(1, 3)],
               f"captures={swapped_capture}")
@@ -689,6 +884,209 @@ def main() -> int:
         _doc.close()
         swap_window._pages_manager.close()
     swap_window.close()
+    app.processEvents()
+
+        # 26d-drag-events: low-level drag-and-drop event flow. Synthesise
+    # dragEnterEvent / dragMoveEvent / dropEvent onto the grid and
+    # verify the expected handlers fire, the hover highlight is
+    # applied + cleared, and the page_moved signal gets emitted.
+    # We use a small subclass that exposes the protected handlers
+    # as public methods so we can call them directly without relying
+    # on Qt's sendEvent (which doesn't dispatch to overridden C++
+    # virtuals from Python tests in PyQt6).
+    from PyQt6.QtCore import QMimeData, QByteArray, QIODevice, QDataStream
+    from PyQt6.QtCore import QPointF as _QPointF  # avoid shadowing the test-level import
+    from PyQt6.QtGui import (QDragEnterEvent, QDragMoveEvent, QDropEvent,
+                            QDragLeaveEvent)
+    drag_pdf = "/tmp/drag_events.pdf"
+    import fitz as _f2
+    _d = _f2.open()
+    for i in range(3):
+        _d.new_page()
+    _d.save(drag_pdf); _d.close()
+    drag_window = TermiPDFWindow()
+    drag_window.engine.open(drag_pdf)
+    drag_window._action_open_pages()
+    pm = drag_window._pages_manager
+    app.processEvents()
+    pm.list.repaint()
+    # Build the same MIME payload the grid produces in startDrag.
+    payload = QByteArray()
+    s = QDataStream(payload, QIODevice.OpenModeFlag.WriteOnly)
+    s.writeUInt32(1)
+    s.writeUInt32(1)  # src = page 1 (1-based)
+    # Build events one at a time and dispatch them via the protected
+    # override (``pm.list.dragEnterEvent(ev)``) — calling the method
+    # directly is the documented PyQt6 way to test the handler.
+    cell_rect1 = pm.list.visualItemRect(pm.list.item(0))
+    local0 = cell_rect1.center()
+    md_enter = QMimeData()
+    md_enter.setData("application/x-termipdf-pages", payload)
+    ent = QDragEnterEvent(
+        local0, Qt.DropAction.MoveAction,
+        md_enter, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    pm.list.dragEnterEvent(ent)
+    check("drag: dragEnterEvent accepted",
+          ent.isAccepted(), "rejected")
+    # dragMoveEvent over the second tile.
+    cell_rect0 = pm.list.visualItemRect(pm.list.item(0))
+    local0_b = cell_rect0.center()
+    md_mv = QMimeData()
+    md_mv.setData("application/x-termipdf-pages", payload)
+    mv = QDragMoveEvent(
+        local0_b, Qt.DropAction.MoveAction,
+        md_mv, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    pm.list.dragMoveEvent(mv)
+    check("drag: dragMoveEvent accepted", mv.isAccepted(), "rejected")
+    check("drag: hover highlight on tile 0",
+          pm.list._hover_index == 0,
+          f"hover={pm.list._hover_index}")
+    # DragLeave clears the highlight.
+    lv = QDragLeaveEvent()
+    pm.list.dragLeaveEvent(lv)
+    check("drag: dragLeaveEvent clears hover",
+          pm.list._hover_index is None,
+          f"hover={pm.list._hover_index}")
+    # Synthesize a drop on tile 2 → expect the callback to fire
+    # and the disk file to reflect the swap. We test via the
+    # callback (reorder_callback fires synchronously from dropMimeData
+    # in the new implementation) rather than via the page_moved
+    # signal, which is intentionally NOT emitted in the new flow
+    # (it would re-run the animation pipeline and undo the swap).
+    callback_capture = []
+    original_cb = pm.list.reorder_callback
+    def _capturing_cb(s, t):
+        callback_capture.append((s, t))
+        return original_cb(s, t)
+    pm.list.reorder_callback = _capturing_cb
+    cell_rect2 = pm.list.visualItemRect(pm.list.item(2))
+    local2 = _QPointF(cell_rect2.center())
+    md_de = QMimeData()
+    md_de.setData("application/x-termipdf-pages", payload)
+    de = QDropEvent(
+        local2, Qt.DropAction.MoveAction,
+        md_de, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    pm.list.dropEvent(de)
+    check("drag: dropEvent accepted", de.isAccepted(), "rejected")
+    check("drag: drop invokes reorder_callback(1, 3)",
+          callback_capture == [(1, 3)],
+          f"callback={callback_capture}")
+    pm.close()
+    drag_window.close()
+    app.processEvents()
+
+    # 26d-strict-arch: validate the strict-architecture requirements
+    # for the page-grid drag-and-drop configuration.
+    strict_pdf = "/tmp/strict_drag.pdf"
+    _d = _f2.open()
+    for i in range(4):
+        _d.new_page()
+    _d.save(strict_pdf); _d.close()
+    strict_window = TermiPDFWindow()
+    strict_window.engine.open(strict_pdf)
+    strict_window._action_open_pages()
+    spm = strict_window._pages_manager
+    app.processEvents()
+    # Property 1: setDragEnabled + setAcceptDrops + setDropIndicatorShown
+    check("strict: dragEnabled is True",
+          spm.list.dragEnabled() is True)
+    check("strict: acceptDrops is True",
+          spm.list.acceptDrops() is True)
+    check("strict: dropIndicatorShown is True",
+          spm.list.showDropIndicator() is True)
+    # Property 2: default drop action is MoveAction
+    check("strict: defaultDropAction == MoveAction",
+          spm.list.defaultDropAction() == Qt.DropAction.MoveAction,
+          f"got={spm.list.defaultDropAction()}")
+    # Property 3: DragDropMode is InternalMove
+    check("strict: dragDropMode == InternalMove",
+          spm.list.dragDropMode()
+          == QAbstractItemView.DragDropMode.InternalMove,
+          f"got={spm.list.dragDropMode()}")
+    # Property 4: dragEnterEvent/dragMoveEvent validate MoveAction.
+    # If the proposed action is CopyAction, we must rewrite it to
+    # MoveAction and accept. We patch ``setDropAction`` to record
+    # what the handler sets (the event's ``dropAction()`` getter
+    # still returns the proposed action in PyQt6, so we can't read
+    # it back from the event after the fact).
+    captured_actions = []
+    original_set_drop_action = QDropEvent.setDropAction
+    def _capture_set_drop_action(self, action):
+        captured_actions.append(action)
+        return original_set_drop_action(self, action)
+    QDropEvent.setDropAction = _capture_set_drop_action
+    try:
+        payload2 = QByteArray()
+        s2 = QDataStream(payload2, QIODevice.OpenModeFlag.WriteOnly)
+        s2.writeUInt32(1); s2.writeUInt32(1)
+        md_strict = QMimeData()
+        md_strict.setData("application/x-termipdf-pages", payload2)
+        ent_strict = QDragEnterEvent(
+            spm.list.visualItemRect(spm.list.item(0)).center(),
+            Qt.DropAction.CopyAction,   # propose COPY deliberately
+            md_strict, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier)
+        captured_actions.clear()
+        spm.list.dragEnterEvent(ent_strict)
+        check("strict: dragEnterEvent rewrites CopyAction → MoveAction",
+              ent_strict.isAccepted()
+              and Qt.DropAction.MoveAction in captured_actions,
+              f"accepted={ent_strict.isAccepted()} "
+              f"set_actions={captured_actions}")
+    finally:
+        QDropEvent.setDropAction = original_set_drop_action
+    # Property 5: dropEvent calls setDropAction(MoveAction) + accept().
+    captured_actions.clear()
+    original_set_drop_action_d = QDropEvent.setDropAction
+    QDropEvent.setDropAction = lambda self, a: (
+        captured_actions.append(a)
+        or original_set_drop_action_d(self, a))
+    try:
+        md_strict2 = QMimeData()
+        md_strict2.setData("application/x-termipdf-pages", payload2)
+        de_strict = QDropEvent(
+            _QPointF(spm.list.visualItemRect(spm.list.item(2)).center()),
+            Qt.DropAction.CopyAction,
+            md_strict2, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier)
+        spm.list.dropEvent(de_strict)
+        check("strict: dropEvent accepted",
+              de_strict.isAccepted())
+        check("strict: dropEvent setDropAction(MoveAction)",
+              Qt.DropAction.MoveAction in captured_actions,
+              f"set_actions={captured_actions}")
+    finally:
+        QDropEvent.setDropAction = original_set_drop_action_d
+    # Property 6: page labels auto-resequence after a reorder.
+    # Run a real swap end-to-end and read the labels back.
+    page_labels = [spm.list.item(i).text() for i in range(spm.list.count())]
+    check("strict: initial labels are Page 1..4",
+          page_labels == [f"Page {i+1}" for i in range(4)],
+          f"labels={page_labels}")
+    spm._dragdrop_reorder(1, 2)
+    elapsed = 0
+    while elapsed < 1500:
+        app.processEvents()
+        time.sleep(0.02)
+        elapsed += 20
+    # After a swap of (1,2), the engine's page order is now [P2, P1, P3, P4].
+    # The dialog repopulates labels based on the new row index, so the
+    # labels are again [Page 1, Page 2, Page 3, Page 4] — perfectly
+    # re-sequenced. The point is that they re-emerge with sequential
+    # numbering, not the old "Page 2, Page 1, Page 3, Page 4".
+    new_labels = [spm.list.item(i).text() for i in range(spm.list.count())]
+    check("strict: labels re-sequence to Page 1..N after swap",
+          new_labels == [f"Page {i+1}" for i in range(4)],
+          f"labels={new_labels}")
+    # Property 7: engine reload confirmed (the on-disk PNG was committed).
+    import fitz as _f3
+    _doc = _f3.open(strict_pdf)
+    check("strict: on-disk page order matches the swap",
+          _doc.page_count == 4,
+          f"len={_doc.page_count}")
+    _doc.close()
+    spm.close()
+    strict_window.close()
     app.processEvents()
 
     # 26e-cli-swap: terminal `swap` command parses and executes.

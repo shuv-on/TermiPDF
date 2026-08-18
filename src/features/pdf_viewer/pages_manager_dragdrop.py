@@ -304,19 +304,17 @@ class ImprovedPageGrid(QListWidget):
             return False
 
         if len(src_pages) == 1:
-            # Single-tile drop. ``reorder_callback`` validates the
-            # request; ``page_moved`` then drives the existing animated
-            # pipeline (animation + ``_finalize_swap`` → on-disk swap +
-            # reload + repopulate). ``pages_dropped_on_target`` would
-            # dispatch a SECOND swap via the animation path, so we
-            # only emit ``page_moved``.
+            # Single-tile drop. ``reorder_callback`` does the actual
+            # swap + engine reload + grid repopulate synchronously —
+            # we do NOT also emit ``page_moved`` here because doing so
+            # would re-run ``_on_page_moved`` → ``_finalize_swap`` and
+            # undo the swap the callback just committed.
             src = src_pages[0]
             target = target_row + 1
             if src <= target:
                 target = max(1, target)
             if not self._invoke_callback(src, target):
                 return False
-            self.page_moved.emit(src, target)
         else:
             # Multi-tile drops continue to use the merge pipeline.
             self.pages_dropped_on_target.emit(target_row + 1, src_pages)

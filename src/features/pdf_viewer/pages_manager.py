@@ -638,25 +638,42 @@ class PagesManager(QDialog):
 
     def _dragdrop_reorder(self, src_page_1based: int,
                           target_page_1based: int) -> tuple[bool, str]:
-        """Reorder callback registered with ``ImprovedPageGrid``.
+        """Drag-drop reorder callback (wires ``ImprovedPageGrid.dropMimeData``).
 
-        Just validates the request — the actual swap is dispatched via
-        ``ImprovedPageGrid``'s ``page_moved`` signal, which is wired
-        to ``_on_page_moved`` (animation + on-disk commit + reload +
-        ``pages_swapped`` / ``pages_reordered`` emit). We do NOT call
-        ``_on_page_moved`` from here: the signal handler does it once.
+        Commits the swap synchronously and immediately, then emits the
+        signals ``pages_swapped`` / ``pages_reordered`` so the main
+        window refreshes the viewer. We deliberately skip the
+        ``page_moved`` → ``_on_page_moved`` → animation pipeline here:
+        a user-initiated drag-drop is already animated by Qt (cursor
+        carries the tile), so the extra ghost-overlay animation adds
+        friction without insight, and any failure in the animation
+        pipeline would leave the disk untouched — a confusing user
+        experience ("I dropped it and nothing happened").
         """
         if not self.engine or not self.engine.is_open or not self.engine.path:
             return False, "No PDF open."
         if src_page_1based == target_page_1based:
             return True, "Same page — no swap."
-        try:
-            n = self.engine.page_count
-        except Exception:
-            return False, "Engine not loaded."
+        n = self.engine.page_count
         if target_page_1based < 1 or target_page_1based > n:
             return False, f"Target page {target_page_1based} out of range (1..{n})."
-        return True, "Validated — page_moved signal will dispatch."
+        ok, msg = PDFManipulator.swap_pages(
+            self.engine.path, src_page_1based, target_page_1based)
+        if not ok:
+            QMessageBox.warning(self, "Swap failed", msg)
+            return False, msg
+        try:
+            self.engine.reload_from_disk()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Reload failed",
+                f"Swap succeeded but reload failed: {exc}")
+            return False, str(exc)
+        self._populate()
+        # Tell the main viewer / status bar that the doc changed.
+        self.pages_swapped.emit(src_page_1based, target_page_1based)
+        self.pages_reordered.emit(target_page_1based)
+        return True, msg
 
     def _on_page_moved(self, src_page_1based: int, target_page_1based: int):
         """User dragged a tile onto another tile — SWAP the two pages.
