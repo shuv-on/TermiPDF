@@ -302,6 +302,10 @@ class PDFViewerUI(QWidget):
         self._active_highlight_color: Tuple[float, float, float] = (1.0, 0.95, 0.0)
         self._active_shape_color: Tuple[float, float, float] = (0.5, 0.6, 1.0)
         self._active_shape_thickness: float = 2.0
+        # Momentum / inertia state (set up after the scroll area is
+        # built below; init here so attribute-lookup never fails
+        # before first use).
+        self._momentum_v: float = 0.0
         # QTextEdit-style kinetic scrolling:
         #   * The wheel handler updates the scrollbar synchronously
         #     (no per-event animation) — this is what gives the canvas
@@ -331,6 +335,13 @@ class PDFViewerUI(QWidget):
         self._virtual_snap_timer.setSingleShot(True)
         self._virtual_snap_timer.setInterval(self._VIRTUAL_SNAP_MS)
         self._virtual_snap_timer.timeout.connect(self._commit_virtual_to_next_page)
+        # Momentum / inertia ticker: per-tick velocity is applied to
+        # the scrollbar and decays exponentially. The timer is only
+        # active while ``_momentum_v > 0``; it stops itself the moment
+        # the velocity falls below the threshold.
+        self._momentum_timer = QTimer(self)
+        self._momentum_timer.setInterval(16)        # ~60 Hz
+        self._momentum_timer.timeout.connect(self._tick_momentum)
         self._setup_ui()
         self._apply_panning_when_view = True
 
@@ -763,6 +774,33 @@ class PDFViewerUI(QWidget):
         """
         self._edge_pending_timer.stop()
         self._edge_pending_dir = 0
+
+    # ----- momentum / inertia (Phase 2 scroll feel) -------------------
+    # The scrollbar now uses a per-pixel, fast-feel wheel step (20px)
+    # plus a momentum tail that keeps the page sliding for a beat after
+    # the user lifts their finger. ``_momentum_v`` is the per-tick
+    # velocity; ``_tick_momentum`` advances the scrollbar by that
+    # amount and decays the velocity; the timer self-stops once the
+    # velocity falls below the threshold.
+    def _feed_momentum(self, v: float) -> None:
+        self._momentum_v = max(self._momentum_v, v)
+        if self._momentum_v > 0 and not self._momentum_timer.isActive():
+            self._momentum_timer.start()
+
+    def _tick_momentum(self) -> None:
+        v = float(self._momentum_v)
+        if v <= 0.0:
+            self._momentum_timer.stop()
+            return
+        # Apply the velocity to the scrollbar (positive = down).
+        sb = self.scroll_area.verticalScrollBar()
+        if sb is not None:
+            sb.setValue(sb.value() + int(round(v)))
+        # Exponential decay: ~12% per tick.
+        self._momentum_v = v * 0.88
+        if self._momentum_v < 0.5:
+            self._momentum_v = 0.0
+            self._momentum_timer.stop()
 
     # ---- debounced edge → page advance -----------------------------
     def _request_edge_advance(self, direction: int) -> None:

@@ -799,13 +799,13 @@ def main() -> int:
         check("GUI: Pages Manager populates thumbnails",
               window._pages_manager.list.count() == last_page,
               f"count={window._pages_manager.list.count()} expected={last_page}")
-        # 26e-extra: verify the page_moved signal is wired so a tile-on-tile
+        # 26e-extra: verify the drag-drop plumbing is wired so a tile-on-tile
         # drop reaches the dialog. We DON'T actually trigger the reorder
         # (which would mutate the on-disk PDF and break later merge tests).
         if last_page >= 2:
-            check("GUI: pages_manager exposes page_moved signal",
-                  hasattr(window._pages_manager.list, "page_moved"),
-                  "missing signal")
+            check("GUI: pages_manager exposes command_runner",
+                  hasattr(window._pages_manager, "_command_runner"),
+                  "missing command_runner")
             check("GUI: pages_manager exposes pages_reordered signal",
                   hasattr(window._pages_manager, "pages_reordered"),
                   "missing signal")
@@ -837,12 +837,24 @@ def main() -> int:
         swap_window._pages_manager.pages_reordered.connect(
             lambda i: reordered_capture.append(i))
         # Swap pages 1 and 3 (drag tile 1 onto tile 3).
-        # The drag-and-drop path now runs a ~420 ms live animation
-        # (cross-fade overlay) before committing the on-disk swap and
-        # emitting the signals. Pump the event loop until either the
-        # swap signal fires or we hit a short timeout.
-        from PyQt6.QtCore import QElapsedTimer
-        swap_window._pages_manager._on_page_moved(1, 3)
+        # The new ``PageGridWidget.dropEvent`` synthesizes ``swap 1 3``
+        # and dispatches it to ``parser.execute`` — i.e. the same
+        # backend as the typed terminal command. The animation runs
+        # ~420 ms before emitting the swap signals. Pump the event
+        # loop until either signal fires or we hit a short timeout.
+        from PyQt6.QtCore import QElapsedTimer, QMimeData, QPointF as _QPointF
+        from PyQt6.QtGui import QDropEvent
+        pm = swap_window._pages_manager
+        # Make tile 0 the current row so ``currentRow()`` returns 0
+        # (matching the "drag from page 1" intent of the test).
+        pm.list.setCurrentRow(0)
+        cell_rect2 = pm.list.visualItemRect(pm.list.item(2))
+        local2 = _QPointF(cell_rect2.center())
+        md_de = QMimeData()
+        de = QDropEvent(
+            local2, Qt.DropAction.MoveAction,
+            md_de, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        pm.list.dropEvent(de)
         timer = QElapsedTimer(); timer.start()
         while (not swapped_capture and timer.elapsed() < 2000):
             app.processEvents()
@@ -888,13 +900,11 @@ def main() -> int:
 
         # 26d-drag-events: low-level drag-and-drop event flow. Synthesise
     # dragEnterEvent / dragMoveEvent / dropEvent onto the grid and
-    # verify the expected handlers fire, the hover highlight is
-    # applied + cleared, and the page_moved signal gets emitted.
-    # We use a small subclass that exposes the protected handlers
-    # as public methods so we can call them directly without relying
-    # on Qt's sendEvent (which doesn't dispatch to overridden C++
-    # virtuals from Python tests in PyQt6).
-    from PyQt6.QtCore import QMimeData, QByteArray, QIODevice, QDataStream
+    # verify the expected handlers fire and the registered command
+    # runner gets invoked with the right swap string. We test the
+    # command_runner (which is the new path) instead of the old
+    # reorder_callback / page_moved signal.
+    from PyQt6.QtCore import QMimeData
     from PyQt6.QtCore import QPointF as _QPointF  # avoid shadowing the test-level import
     from PyQt6.QtGui import (QDragEnterEvent, QDragMoveEvent, QDropEvent,
                             QDragLeaveEvent)
@@ -910,18 +920,13 @@ def main() -> int:
     pm = drag_window._pages_manager
     app.processEvents()
     pm.list.repaint()
-    # Build the same MIME payload the grid produces in startDrag.
-    payload = QByteArray()
-    s = QDataStream(payload, QIODevice.OpenModeFlag.WriteOnly)
-    s.writeUInt32(1)
-    s.writeUInt32(1)  # src = page 1 (1-based)
     # Build events one at a time and dispatch them via the protected
     # override (``pm.list.dragEnterEvent(ev)``) — calling the method
     # directly is the documented PyQt6 way to test the handler.
     cell_rect1 = pm.list.visualItemRect(pm.list.item(0))
     local0 = cell_rect1.center()
     md_enter = QMimeData()
-    md_enter.setData("application/x-termipdf-pages", payload)
+    md_enter.setText("drag-source")
     ent = QDragEnterEvent(
         local0, Qt.DropAction.MoveAction,
         md_enter, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
@@ -932,45 +937,44 @@ def main() -> int:
     cell_rect0 = pm.list.visualItemRect(pm.list.item(0))
     local0_b = cell_rect0.center()
     md_mv = QMimeData()
-    md_mv.setData("application/x-termipdf-pages", payload)
+    md_mv.setText("drag-source")
     mv = QDragMoveEvent(
         local0_b, Qt.DropAction.MoveAction,
         md_mv, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     pm.list.dragMoveEvent(mv)
     check("drag: dragMoveEvent accepted", mv.isAccepted(), "rejected")
-    check("drag: hover highlight on tile 0",
-          pm.list._hover_index == 0,
-          f"hover={pm.list._hover_index}")
-    # DragLeave clears the highlight.
+    # DragLeave is a clean exit.
     lv = QDragLeaveEvent()
     pm.list.dragLeaveEvent(lv)
-    check("drag: dragLeaveEvent clears hover",
-          pm.list._hover_index is None,
-          f"hover={pm.list._hover_index}")
-    # Synthesize a drop on tile 2 → expect the callback to fire
-    # and the disk file to reflect the swap. We test via the
-    # callback (reorder_callback fires synchronously from dropMimeData
-    # in the new implementation) rather than via the page_moved
-    # signal, which is intentionally NOT emitted in the new flow
-    # (it would re-run the animation pipeline and undo the swap).
-    callback_capture = []
-    original_cb = pm.list.reorder_callback
-    def _capturing_cb(s, t):
-        callback_capture.append((s, t))
-        return original_cb(s, t)
-    pm.list.reorder_callback = _capturing_cb
+    # Synthesize a drop on tile 2 → expect the registered
+    # ``command_runner`` to be invoked with the literal
+    # ``swap <src_page> <target_page>`` string that the user would
+    # type at the prompt. We swap the runner for a capturing shim
+    # so the assertion reads the actual command without driving
+    # the full animation pipeline (which would mutate the file).
+    captured_cmds = []
+    original_runner = pm._command_runner
+    def _capturing_runner(raw):
+        captured_cmds.append(raw)
+        # Don't propagate: this would mutate the on-disk PDF and
+        # break later tests in the same run.
+    pm._command_runner = _capturing_runner
+    # Make tile 0 the current row so ``currentRow()`` returns 0
+    # (matching the "drag from page 1" intent of the test).
+    pm.list.setCurrentRow(0)
     cell_rect2 = pm.list.visualItemRect(pm.list.item(2))
     local2 = _QPointF(cell_rect2.center())
     md_de = QMimeData()
-    md_de.setData("application/x-termipdf-pages", payload)
+    md_de.setText("drag-source")
     de = QDropEvent(
         local2, Qt.DropAction.MoveAction,
         md_de, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     pm.list.dropEvent(de)
     check("drag: dropEvent accepted", de.isAccepted(), "rejected")
-    check("drag: drop invokes reorder_callback(1, 3)",
-          callback_capture == [(1, 3)],
-          f"callback={callback_capture}")
+    check("drag: drop invokes command_runner('swap 1 3')",
+          captured_cmds == ["swap 1 3"],
+          f"captured={captured_cmds}")
+    pm._command_runner = original_runner
     pm.close()
     drag_window.close()
     app.processEvents()
@@ -1003,67 +1007,70 @@ def main() -> int:
           spm.list.dragDropMode()
           == QAbstractItemView.DragDropMode.InternalMove,
           f"got={spm.list.dragDropMode()}")
-    # Property 4: dragEnterEvent/dragMoveEvent validate MoveAction.
-    # If the proposed action is CopyAction, we must rewrite it to
-    # MoveAction and accept. We patch ``setDropAction`` to record
-    # what the handler sets (the event's ``dropAction()`` getter
-    # still returns the proposed action in PyQt6, so we can't read
-    # it back from the event after the fact).
-    captured_actions = []
-    original_set_drop_action = QDropEvent.setDropAction
-    def _capture_set_drop_action(self, action):
-        captured_actions.append(action)
-        return original_set_drop_action(self, action)
-    QDropEvent.setDropAction = _capture_set_drop_action
-    try:
-        payload2 = QByteArray()
-        s2 = QDataStream(payload2, QIODevice.OpenModeFlag.WriteOnly)
-        s2.writeUInt32(1); s2.writeUInt32(1)
-        md_strict = QMimeData()
-        md_strict.setData("application/x-termipdf-pages", payload2)
-        ent_strict = QDragEnterEvent(
-            spm.list.visualItemRect(spm.list.item(0)).center(),
-            Qt.DropAction.CopyAction,   # propose COPY deliberately
-            md_strict, Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier)
-        captured_actions.clear()
-        spm.list.dragEnterEvent(ent_strict)
-        check("strict: dragEnterEvent rewrites CopyAction → MoveAction",
-              ent_strict.isAccepted()
-              and Qt.DropAction.MoveAction in captured_actions,
-              f"accepted={ent_strict.isAccepted()} "
-              f"set_actions={captured_actions}")
-    finally:
-        QDropEvent.setDropAction = original_set_drop_action
-    # Property 5: dropEvent calls setDropAction(MoveAction) + accept().
-    captured_actions.clear()
-    original_set_drop_action_d = QDropEvent.setDropAction
-    QDropEvent.setDropAction = lambda self, a: (
-        captured_actions.append(a)
-        or original_set_drop_action_d(self, a))
-    try:
-        md_strict2 = QMimeData()
-        md_strict2.setData("application/x-termipdf-pages", payload2)
-        de_strict = QDropEvent(
-            _QPointF(spm.list.visualItemRect(spm.list.item(2)).center()),
-            Qt.DropAction.CopyAction,
-            md_strict2, Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier)
-        spm.list.dropEvent(de_strict)
-        check("strict: dropEvent accepted",
-              de_strict.isAccepted())
-        check("strict: dropEvent setDropAction(MoveAction)",
-              Qt.DropAction.MoveAction in captured_actions,
-              f"set_actions={captured_actions}")
-    finally:
-        QDropEvent.setDropAction = original_set_drop_action_d
-    # Property 6: page labels auto-resequence after a reorder.
-    # Run a real swap end-to-end and read the labels back.
+    # Property 4: dragEnterEvent rejects empty MIME / accepts text MIME.
+    # The new dragEnter accepts proposals when the payload has text or
+    # URLs (so the cursor shows the drop indicator mid-drag). With an
+    # empty MimeData the proposal is ignored.
+    md_empty = QMimeData()  # bound to a local — inline QMimeData() caused
+                            # PyQt6 to segfault when the C++ side kept the
+                            # only reference.
+    ent_empty = QDragEnterEvent(
+        spm.list.visualItemRect(spm.list.item(0)).center(),
+        Qt.DropAction.CopyAction,
+        md_empty, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier)
+    spm.list.dragEnterEvent(ent_empty)
+    check("strict: dragEnterEvent rejects empty MimeData",
+          not ent_empty.isAccepted(),
+          f"accepted={ent_empty.isAccepted()}")
+    md_text = QMimeData()
+    md_text.setText("drag-source")
+    ent_text = QDragEnterEvent(
+        spm.list.visualItemRect(spm.list.item(0)).center(),
+        Qt.DropAction.CopyAction,
+        md_text, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier)
+    spm.list.dragEnterEvent(ent_text)
+    check("strict: dragEnterEvent accepts text MimeData",
+          ent_text.isAccepted(),
+          f"accepted={ent_text.isAccepted()}")
+    # Property 5: dropEvent invokes command_runner('swap A B').
+    # We capture every command string passed to the runner so we can
+    # assert the exact "swap 1 3" was dispatched.
+    strict_captured = []
+    original_strict_runner = spm._command_runner
+    def _capture_strict_runner(raw: str):
+        strict_captured.append(raw)
+        return original_strict_runner(raw)
+    spm._command_runner = _capture_strict_runner
+    # Source = currentRow() = 0 (set explicitly below) → page 1.
+    # Target = row(itemAt(center of tile 2)) = 2 → page 3.
+    spm.list.setCurrentRow(0)
+    pos_strict = _QPointF(spm.list.visualItemRect(spm.list.item(2)).center())
+    md_drop = QMimeData()
+    md_drop.setText("drag-source")
+    de_strict = QDropEvent(
+        pos_strict,
+        Qt.DropAction.MoveAction,
+        md_drop, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier)
+    spm.list.dropEvent(de_strict)
+    check("strict: dropEvent accepted",
+          de_strict.isAccepted(),
+          f"accepted={de_strict.isAccepted()}")
+    check("strict: dropEvent invokes command_runner('swap 1 3')",
+          "swap 1 3" in strict_captured,
+          f"captured={strict_captured}")
+    spm._command_runner = original_strict_runner
+    # Property 6: page labels auto-resequence after a real swap.
+    # We use the silent runner so the test doesn't depend on the
+    # terminal parser being a stand-in for the GUI button.
     page_labels = [spm.list.item(i).text() for i in range(spm.list.count())]
     check("strict: initial labels are Page 1..4",
           page_labels == [f"Page {i+1}" for i in range(4)],
           f"labels={page_labels}")
-    spm._dragdrop_reorder(1, 2)
+    spm._silent_command_runner("swap 1 2")
+    spm._populate()
     elapsed = 0
     while elapsed < 1500:
         app.processEvents()

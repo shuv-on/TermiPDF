@@ -186,6 +186,13 @@ class TermiPDFWindow(QMainWindow):
         self.recent = RecentFiles()
         self.undo_stack = UndoStack(None)  # re-bound to current engine on demand
 
+        # Dirty-tracking: flips when editing ops modify the document, and
+        # resets on save / open. ``has_unsaved_changes`` is read by the
+        # tab title and the close-confirmation flow; ``mark_unsaved()``
+        # is the explicit toggle annotation ops call after a write.
+        self.has_unsaved_changes: bool = False
+        # Method form is bound via the class definition below.
+
         # ---- UI state -----------------------------------------------------
         # Initialized BEFORE _build_*() so the toolbar can register its
         # checkable tool buttons into self._tool_buttons.
@@ -548,6 +555,32 @@ class TermiPDFWindow(QMainWindow):
         else:
             self.page_indicator.setText(f"{page_1based} / {total}")
             self.page_input_btn.setText(f"{page_1based} / {total}")
+
+    def _active_session(self) -> Optional[dict]:
+        """Return the session dict backing the currently focused tab.
+
+        Used by ``mark_unsaved`` (and any other consumer that needs
+        the active session's metadata) so the dirty flag and tab
+        title stay in sync with which tab the user is on.
+        """
+        if not hasattr(self, "_tabs") or not hasattr(self, "_sessions"):
+            return None
+        idx = self._tabs.currentIndex()
+        if 0 <= idx < len(self._sessions):
+            return self._sessions[idx]
+        return None
+
+    def mark_unsaved(self) -> None:
+        """Flip the dirty flag and refresh the tab title to show '*'.
+
+        Annotation ops, page-swap, page-rotate, and page-delete call this
+        after a successful write. ``save`` (in-place) and ``open`` reset
+        the flag back to False.
+        """
+        self.has_unsaved_changes = True
+        sess = self._active_session()
+        if sess is not None:
+            self._mark_session_dirty(sess, True)
 
     def _update_mode_badge(self, mode: str):
         self.mode_badge.setText(mode)
@@ -1033,6 +1066,7 @@ class TermiPDFWindow(QMainWindow):
         self.parser.register("dock", self._cmd_dock)
         self.parser.register("print", self._cmd_print)
         self.parser.register("find", self._cmd_find)
+        self.parser.register("view", self._cmd_view)
 
     # ====================================================================
     # Command handlers
@@ -1043,6 +1077,47 @@ class TermiPDFWindow(QMainWindow):
     def _cmd_history(self, _args):
         return CommandResult.print(
             "Use ↑ / ↓ keys in the terminal input to cycle history.")
+
+    def _cmd_view(self, args):
+        """Switch the active session between single-page and continuous view.
+
+        The session dict carries ``view_mode`` ("single" | "continuous") and
+        a ``continuous_view`` widget reference. The terminal command lets
+        the user toggle which view the active tab is hosting; the tab's
+        central widget is swapped to the matching viewer.
+        """
+        if not args:
+            return CommandResult.error("Usage: view <single|continuous>")
+        mode = args[0].lower()
+        if mode not in ("single", "continuous"):
+            return CommandResult.error(
+                f"Unknown view mode: {args[0]!r}. Use 'single' or 'continuous'.")
+        sess = self._active_session()
+        if sess is None:
+            return CommandResult.error("No active session.")
+        if sess["view_mode"] == mode:
+            return CommandResult.print(f"Already in {mode} view.")
+        idx = self._tabs.currentIndex()
+        if mode == "continuous":
+            # Lazily create the continuous-view widget on first use so
+            # the tab can swap back to single without re-instantiating.
+            if sess["continuous_view"] is None:
+                from features.pdf_viewer.continuous_view import ContinuousView
+                cv = ContinuousView()
+                cv.attach_engine(sess["engine"])
+                sess["continuous_view"] = cv
+            self._tabs.insertTab(idx, sess["continuous_view"],
+                                 os.path.basename(sess["path"] or "Tab"))
+            self._tabs.removeTab(idx + 1)
+            self._tabs.setCurrentIndex(idx)
+        else:
+            pdf_viewer = sess["pdf_viewer"]
+            self._tabs.insertTab(idx, pdf_viewer,
+                                 os.path.basename(sess["path"] or "Tab"))
+            self._tabs.removeTab(idx + 1)
+            self._tabs.setCurrentIndex(idx)
+        sess["view_mode"] = mode
+        return CommandResult.print(f"Switched to {mode} view.")
 
     # ----- viewer --------------------------------------------------------
     def _cmd_open(self, args):
@@ -1309,11 +1384,10 @@ class TermiPDFWindow(QMainWindow):
             except Exception:
                 pass
             # Mark the active session clean and refresh its tab title.
-            for sess in self._sessions:
-                if sess["engine"] is self.engine:
-                    sess["dirty"] = False
-                    self._refresh_tab_title(sess)
-                    break
+            self.has_unsaved_changes = False
+            sess = self._active_session()
+            if sess is not None:
+                self._mark_session_dirty(sess, False)
             self._update_window_title()
         return self._as_result(ok, msg)
 
@@ -1633,6 +1707,21 @@ class TermiPDFWindow(QMainWindow):
                 self._do_open(self.engine.path)
             except Exception:
                 pass
+            # If the Pages Manager is open, let it observe the swap so
+            # it can run its animation / repopulate / emit the
+            # pages_swapped + pages_reordered signals. Pass
+            # ``apply_on_disk=False`` because we just wrote the swap
+            # above; the PM must NOT re-write or the file is touched
+            # twice per pair.
+            pm = getattr(self, "_pages_manager", None)
+            if pm is not None and pm.isVisible():
+                for a, b in sorted(pairs, key=lambda p: -max(p[0], p[1])):
+                    if a == b:
+                        continue
+                    try:
+                        pm.animate_terminal_swap(a, b, apply_on_disk=False)
+                    except Exception:
+                        pass
 
         msg = "Swap complete." if ok_all else "Swap finished with errors."
         msg += "\n" + "\n".join(results)
@@ -1781,12 +1870,21 @@ class TermiPDFWindow(QMainWindow):
             "annot": annot,
             "editor": editor,
             "dirty": False,
+            # Single ↔ continuous view swap: ``view single|continuous`` in
+            # the terminal replaces the tab's central widget with either
+            # the existing single-page viewer (``pdf_viewer``) or the
+            # freshly-created continuous view (``continuous_view``).
+            # Initial mode matches the default of opening a fresh tab.
+            "view_mode": "single",
+            "continuous_view": None,
         }
         self._sessions.append(session)
         idx = self._tabs.addTab(pdf_viewer, os.path.basename(path))
         self._tabs.setTabToolTip(idx, path)
         self._bind_session_signals(session)
         self._tabs.setCurrentIndex(idx)
+        # A freshly opened document is by definition clean.
+        self.has_unsaved_changes = False
         # self.engine / self.pdf_viewer are now updated via
         # _on_tab_changed → _set_active_session.
         self._tabs.currentChanged.emit(idx)
@@ -1971,7 +2069,22 @@ class TermiPDFWindow(QMainWindow):
         # Lazy-create + keep instance alive across opens so the dialog
         # state (selection, window position) is preserved.
         if not hasattr(self, "_pages_manager") or self._pages_manager is None:
-            self._pages_manager = PagesManager(self.engine, parent=self)
+            # ``command_runner`` routes drag-drop through the same
+            # terminal backend the user types at the prompt — i.e.
+            # ``PageGridWidget.dropEvent`` synthesizes ``swap A B``
+            # and we dispatch it via ``parser.execute`` so the GUI
+            # chain is literally the same function call a typed
+            # command runs (validation, animation, engine reload,
+            # status-bar feedback).
+            def _cmd_runner(raw: str) -> CommandResult:
+                result = self.parser.execute(raw)
+                self._render_result(result)
+                return result
+
+            self._pages_manager = PagesManager(
+                self.engine, parent=self,
+                command_runner=_cmd_runner,
+            )
             self._pages_manager.navigate_to_page.connect(self._on_pages_manager_navigate)
             self._pages_manager.pages_deleted.connect(self._on_pages_manager_deleted)
             self._pages_manager.new_pdf_generated.connect(self._on_pages_manager_new_pdf)
@@ -2583,10 +2696,52 @@ class TermiPDFWindow(QMainWindow):
                 original_length=meta.get("original_length", len(text)),
                 encoded_length=meta.get("encoded_length", len(text)),
             )
+            # Centre the popup on the main window. Without an explicit
+            # position Qt sometimes places the dialog off-screen on
+            # multi-monitor setups (the popup is 820×880 — too big to
+            # fit on a 720p laptop screen if Qt picks the wrong
+            # monitor). We nudge the position so the dialog stays
+            # fully inside the parent window's available rect.
+            self._position_child_on_screen(dlg)
             # Non-modal so the user can keep working with the PDF.
             dlg.show()
         except Exception as exc:
             self._render_result(CommandResult.error(f"QR dialog failed: {exc}"))
+
+    def _position_child_on_screen(self, child) -> None:
+        """Place ``child`` so it fits fully inside the parent's available
+        screen rect, centring it on the main window when there's room.
+
+        Qt's default behaviour for ``child.show()`` with a parent is
+        unpredictable across platforms and monitor configs: the child
+        can land offscreen if the main window straddles two monitors.
+        We compute the intersection of the parent's geometry with the
+        available screen and place the child centred inside it.
+        """
+        try:
+            from PyQt6.QtGui import QGuiApplication
+            parent_geo = self.frameGeometry()
+            screen = QGuiApplication.screenAt(parent_geo.center())
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            avail = screen.availableGeometry() if screen else parent_geo
+            # Clamp the child's size to the available screen so a small
+            # laptop monitor still sees a fully-sized popup.
+            target_w = min(child.width(), avail.width())
+            target_h = min(child.height(), avail.height())
+            if (target_w, target_h) != (child.width(), child.height()):
+                child.resize(target_w, target_h)
+            # Centre on the parent's frame centre, then shift inside
+            # the available rect so the title bar stays grabbable.
+            cx = parent_geo.center().x() - child.width() // 2
+            cy = parent_geo.center().y() - child.height() // 2
+            x = max(avail.left(), min(cx, avail.right() - child.width() + 1))
+            y = max(avail.top(), min(cy, avail.bottom() - child.height() + 1))
+            child.move(x, y)
+        except Exception:
+            # Best-effort — if positioning fails the popup still opens,
+            # it just may not be centred.
+            pass
 
     def _copy_page_text(self):
         if not self.engine.is_open:
@@ -2731,8 +2886,13 @@ class TermiPDFWindow(QMainWindow):
         any in-place page mutation (swap, delete, rotate via the
         Pages Manager) as "dirty" because those write to disk
         directly — there's nothing to save in that case, but the
-        file has already been modified.
+        file has already been modified. ``mark_unsaved()`` flips
+        ``self.has_unsaved_changes`` directly, which we also honour
+        here so explicit page-mutation events (swap, delete, rotate)
+        prompt the user before the window closes.
         """
+        if self.has_unsaved_changes:
+            return True
         for sess in getattr(self, "_sessions", []):
             stack = sess.get("undo_stack")
             if stack is not None:

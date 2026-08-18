@@ -45,9 +45,6 @@ from PyQt6.QtWidgets import (
 
 from features.pdf_viewer.viewer_engine import ViewerEngine
 from features.pdf_editor.manipulation import PDFManipulator
-from features.pdf_viewer.pages_manager_dragdrop import (
-    ImprovedPageGrid, make_improved_grid,
-)
 
 
 # Tile size used by the grid. The grid is responsive — the column count
@@ -65,13 +62,6 @@ _SWAP_FILL     = "rgba(255, 235, 59, 0.85)"
 _SWAP_BORDER   = "#f59e0b"
 _SWAP_HIGHLIGHT = QColor(255, 235, 59, 90)
 _SWAP_DURATION_MS = 420
-
-
-# Drag-hover palette + MIME constants live in
-# ``pages_manager_dragdrop.py`` (where the ImprovedPageGrid is
-# implemented). This file used to carry its own copies; removing
-# them keeps the two implementations of drag-drop UI in sync via a
-# single source of truth.
 
 
 def _placeholder_tile(w: int, h: int, text: str = "…",
@@ -282,6 +272,149 @@ class _ThumbnailWorker(QObject):
             self.finished.emit()
 
 
+class PageGridWidget(QListWidget):
+    """QListWidget whose dropEvent runs the same backend as the
+    terminal ``swap`` command.
+
+    Configuring and populating this grid is the parent's job; this
+    class only wires drag-drop so the user can tile-rearrange via the
+    same code path the terminal uses. The drag-drop machinery itself
+    is treated as a transparent pass-through: the only logic that
+    lives here is "translate the user's drag into a `swap A B`
+    command string and hand it to the registered command runner".
+
+    The contract is:
+
+        User drags tile A onto tile B
+            → ``dropEvent`` resolves ``src_row`` via ``currentRow()``
+            → ``dropEvent`` resolves ``tgt_row`` via
+              ``self.row(self.itemAt(event.position().toPoint()))``
+            → We dispatch ``swap <src> <tgt>`` to the parent's
+              ``_command_runner`` callable
+            → The terminal backend handles engine reload, animation,
+              repopulation, and signal emission — exactly once.
+
+    We deliberately route through the terminal backend (instead of
+    calling ``PDFManipulator.swap_pages`` directly here) so the GUI
+    chain is *literally the same function call* a typed terminal
+    command runs — i.e. validation, status-bar feedback, animation in
+    the open PM, disk write, engine reload, and signal emission all
+    happen exactly once, in the same order, regardless of how the
+    swap was triggered.
+
+    The ``command_runner`` callable is held on the parent ``PagesManager``
+    so we read it through ``self.parent()`` at drop time — that way
+    the parent can swap runners (e.g. for tests) without re-creating
+    the widget, and we never carry a stale reference.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # The command runner is read from the parent (``PagesManager``)
+        # at drop time so we always see the parent's most-recent
+        # reference — tests can swap the runner in-place by mutating
+        # ``pm._command_runner`` and we don't need to be re-wired.
+        self._apply_drag_drop_config()
+
+    def _apply_drag_drop_config(self) -> None:
+        """Set every flag the drag/drop machinery needs.
+
+        Called from ``__init__`` and re-issued after the parent flips
+        ``setViewMode(IconMode)`` + ``setMovement(Static)`` because Qt
+        silently downgrades ``dragDropMode`` back to ``DropOnly`` in
+        that combination. The parent calls ``setViewMode`` first,
+        then ``finalize_view_mode`` (this method) so the config is
+        the single source of truth.
+        """
+        self.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setUniformItemSizes(True)
+
+    def _command_runner(self, raw: str):
+        """Resolve the runner at drop time so we always see the
+        parent's latest reference, never a stale one captured at
+        construction."""
+        parent = self.parent()
+        if parent is None:
+            raise RuntimeError(
+                "PageGridWidget has no parent — cannot resolve "
+                "command runner.")
+        return parent._command_runner(raw)
+
+    def dropEvent(self, event):
+        # Source index (0-based): the row currently selected. The
+        # ``InternalMove`` machinery keeps the source tile flagged as
+        # ``current`` until the drop fires, so ``currentRow()`` is the
+        # exact row the user started dragging.
+        src_row = self.currentRow()
+        # Target index (0-based): the row under the cursor at the
+        # moment the drop fires. ``event.position()`` is the PyQt6.6+
+        # API; fall back to ``event.pos()`` for older bindings. If the
+        # cursor lands on the gap between tiles, ``itemAt`` returns
+        # ``None`` and we treat the drop as "append to end".
+        pos = (event.position().toPoint()
+               if hasattr(event, "position") else event.pos())
+        tgt_item = self.itemAt(pos)
+        tgt_row = (self.row(tgt_item) if tgt_item is not None
+                   else self.count())
+
+        if src_row < 0 or tgt_row < 0 or src_row == tgt_row:
+            # No-op drag (src==tgt) or degenerate: ignore.
+            event.ignore()
+            return
+
+        # 0-based rows → 1-based page numbers, matching the terminal's
+        # ``swap`` command syntax.
+        from_page = src_row + 1
+        to_page = tgt_row + 1
+
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+
+        # Hand the swap to the terminal backend. The string is the
+        # same one the user would type at the prompt, so we get all
+        # the validation + animation + engine reload + status-bar
+        # feedback for free. The backend is responsible for repopulating
+        # the grid when the swap finalizes (via the animation pipeline
+        # or, in the silent fallback, immediately).
+        try:
+            self._command_runner(f"swap {from_page} {to_page}")
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Drag-drop failed", f"Swap failed: {exc}")
+
+    # ``dragEnterEvent`` / ``dragMoveEvent`` keep Qt's standard
+    # "accept MoveAction" behaviour so the dropEvent actually fires
+    # under PyQt6 6.10+ (where ``startDrag`` overrides aren't
+    # reliably invoked). Without these acceptors Qt would silently
+    # reject the drop and the user would see a dead cursor.
+    #
+    # Real QListWidget-internal drags use Qt's own private mime type
+    # (``application/x-qt-windows-mime;type="application/x-qt-item"``
+    # on X11, similar internal names elsewhere). We accept any
+    # payload that carries at least one MIME format — text, urls,
+    # or Qt's internal drag mime — so the user's actual tile-on-tile
+    # drag lands. An empty ``QMimeData`` (no formats) is rejected
+    # so dropping a bare event from a non-application source
+    # doesn't trigger our command runner.
+    def _accept_drag(self, event) -> None:
+        mime = event.mimeData()
+        if (mime.hasText() or mime.hasUrls()
+                or any(mime.hasFormat(f) for f in mime.formats())):
+            event.acceptProposedAction()
+
+    def dragEnterEvent(self, event):
+        self._accept_drag(event)
+
+    def dragMoveEvent(self, event):
+        self._accept_drag(event)
+
+
 class PagesManager(QDialog):
     """Grid view of all pages with multi-select, drag-drop, and context menu."""
 
@@ -297,9 +430,18 @@ class PagesManager(QDialog):
     # are still in the doc, just in each other's old slots.
     pages_swapped = pyqtSignal(int, int)
 
-    def __init__(self, engine: ViewerEngine, parent=None):
+    def __init__(self, engine: ViewerEngine, parent=None,
+                 command_runner=None):
         super().__init__(parent)
         self.engine = engine
+        # ``command_runner`` is injected by main_window so drag-drop
+        # routes through the same terminal backend (``parser.execute``)
+        # that the user types at the prompt. When not supplied (e.g.
+        # stand-alone PM tests) we fall back to a silent in-process
+        # swap so the dialog still works without the main window.
+        self._command_runner = (command_runner
+                                if command_runner is not None
+                                else self._silent_command_runner)
         self.setWindowTitle("Pages Manager")
         self.setMinimumSize(640, 480)
         self.resize(960, 640)
@@ -311,6 +453,30 @@ class PagesManager(QDialog):
         self._thumb_worker: Optional[_ThumbnailWorker] = None
         self._build_ui()
         self._populate()
+
+    def _silent_command_runner(self, raw: str) -> None:
+        """Fallback command runner used when no terminal backend is
+        injected (e.g. dialog used in isolation for tests).
+
+        Only ``swap`` is meaningful here — every other command needs
+        the surrounding main_window state. We log a silent no-op for
+        everything else so the dialog still functions for tile drag
+        in tests.
+        """
+        if not raw or not self.engine or not self.engine.path:
+            return
+        parts = raw.split()
+        if len(parts) >= 3 and parts[0] == "swap":
+            try:
+                a, b = int(parts[1]), int(parts[2])
+            except ValueError:
+                return
+            # Delegate to ``_finalize_swap`` so the on-disk write,
+            # engine reload, repopulate, and signal emission all live
+            # in one place. Keeping the fallback in lock-step with the
+            # animated path means tests exercise the same code the
+            # real terminal ``swap`` command does.
+            self._finalize_swap(a, b)
 
     def closeEvent(self, event):
         """Cancel any in-flight thumbnail worker so we don't outlive the
@@ -367,25 +533,26 @@ class PagesManager(QDialog):
 
         root.addLayout(bar)
 
-        # Grid of thumbnails. We use ``ImprovedPageGrid`` (a self-contained
-        # ``QListWidget`` subclass) instead of the in-file ``_PageGrid``
-        # because the latter's ``startDrag`` override is not reliably
-        # invoked under PyQt 6.10+ — meaning the on-disk PDF was never
-        # being reordered when the user dragged a tile. ``ImprovedPageGrid``
-        # hooks ``dropMimeData`` (a public Qt virtual that IS called) and
-        # uses ``reorder_callback`` to persist the swap via the same
-        # ``PDFManipulator.swap_pages`` primitive the terminal uses.
-        self.list = make_improved_grid(TILE_W, TILE_H)
-        # Wire the reorder callback BEFORE we add any tiles so a drop on
-        # an already-populated grid can find the engine path.
-        self.list.reorder_callback = self._dragdrop_reorder
+        # Grid of thumbnails. Drag-drop routes through the same
+        # terminal backend as the typed ``swap`` command — i.e. the
+        # ``PageGridWidget`` reads ``currentRow()`` and
+        # ``self.row(self.itemAt(...))`` at drop time, then dispatches
+        # ``swap A B`` to ``self._command_runner``. No duplicate swap
+        # logic lives in the widget.
+        self.list = PageGridWidget(parent=self)
+        self.list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list.setIconSize(QSize(TILE_W - 24, TILE_H - 50))
+        self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list.setMovement(QListWidget.Movement.Static)
+        self.list.setSpacing(8)
+        # Qt's IconMode + Static movement silently downgrades
+        # ``dragDropMode`` back to ``DropOnly``; the widget re-applies
+        # its config so we don't lose drag-drop in the grid.
+        self.list._apply_drag_drop_config()
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._on_context_menu)
         self.list.itemActivated.connect(self._on_item_activated)
         self.list.itemClicked.connect(self._on_item_clicked)
-        self.list.pages_dropped_on_target.connect(self._on_pages_dropped)
-        self.list.external_pdfs_dropped.connect(self._on_external_pdfs_dropped)
-        self.list.page_moved.connect(self._on_page_moved)
         # Recompute the column count on resize.
         self.list.resizeEvent = self._wrap_resize_event(self.list.resizeEvent)
         root.addWidget(self.list, 1)
@@ -636,116 +803,6 @@ class PagesManager(QDialog):
         else:
             QMessageBox.warning(self, "Merge failed", msg)
 
-    def _dragdrop_reorder(self, src_page_1based: int,
-                          target_page_1based: int) -> tuple[bool, str]:
-        """Drag-drop reorder callback (wires ``ImprovedPageGrid.dropMimeData``).
-
-        Commits the swap synchronously and immediately, then emits the
-        signals ``pages_swapped`` / ``pages_reordered`` so the main
-        window refreshes the viewer. We deliberately skip the
-        ``page_moved`` → ``_on_page_moved`` → animation pipeline here:
-        a user-initiated drag-drop is already animated by Qt (cursor
-        carries the tile), so the extra ghost-overlay animation adds
-        friction without insight, and any failure in the animation
-        pipeline would leave the disk untouched — a confusing user
-        experience ("I dropped it and nothing happened").
-        """
-        if not self.engine or not self.engine.is_open or not self.engine.path:
-            return False, "No PDF open."
-        if src_page_1based == target_page_1based:
-            return True, "Same page — no swap."
-        n = self.engine.page_count
-        if target_page_1based < 1 or target_page_1based > n:
-            return False, f"Target page {target_page_1based} out of range (1..{n})."
-        ok, msg = PDFManipulator.swap_pages(
-            self.engine.path, src_page_1based, target_page_1based)
-        if not ok:
-            QMessageBox.warning(self, "Swap failed", msg)
-            return False, msg
-        try:
-            self.engine.reload_from_disk()
-        except Exception as exc:
-            QMessageBox.warning(
-                self, "Reload failed",
-                f"Swap succeeded but reload failed: {exc}")
-            return False, str(exc)
-        self._populate()
-        # Tell the main viewer / status bar that the doc changed.
-        self.pages_swapped.emit(src_page_1based, target_page_1based)
-        self.pages_reordered.emit(target_page_1based)
-        return True, msg
-
-    def _on_page_moved(self, src_page_1based: int, target_page_1based: int):
-        """User dragged a tile onto another tile — SWAP the two pages.
-
-        The user explicitly wants the source and target pages to
-        *exchange positions* (no shift of intervening pages, total page
-        count unchanged). We use ``PDFManipulator.swap_pages`` for that,
-        then reload + repopulate + emit ``pages_swapped`` so the main
-        window can refresh the viewer.
-        """
-        if not self.engine or not self.engine.is_open or not self.engine.path:
-            return
-        if src_page_1based == target_page_1based:
-            return  # no-op — the user dropped a tile onto itself
-        # ---- in-memory grid mutation (spec: instant visual feedback) ---
-        # The spec requires the underlying page order to flip
-        # immediately so the thumbnail labels track the new sequence
-        # the moment the drop commits. We do this by popping the
-        # source item out of the list widget and re-inserting it at
-        # the target row, then emitting the model's ``layoutChanged``
-        # so every observer re-binds row ↔ label.
-        self._swap_tiles_in_memory(src_page_1based, target_page_1based)
-        # Then run the animation + on-disk swap so the change persists
-        # after the dialog closes.
-        self._animate_swap_then_apply(src_page_1based, target_page_1based)
-
-    def _swap_tiles_in_memory(self, src_page_1based: int,
-                               target_page_1based: int) -> None:
-        """Apply the spec's in-memory swap pattern: take the source item,
-        re-insert it at the target row, then rebind row → label so the
-        new sequence is visible before the on-disk write completes.
-
-        ``pages.insert(target, pages.pop(source))`` is the textbook
-        rewrite and we model it on the underlying ``QListWidgetItem``
-        model so the existing repopulate path is left alone.
-        """
-        src_row = src_page_1based - 1
-        tgt_row = target_page_1based - 1
-        if src_row == tgt_row:
-            return
-        src_item = self.list.item(src_row)
-        if src_item is None:
-            return
-        # `takeItem` removes + transfers ownership; we keep the
-        # reference so the widget isn't garbage-collected.
-        taken = self.list.takeItem(src_row)
-        if taken is None:
-            return
-        # Clamp the insert row against the new (post-removal) count.
-        insert_row = max(0, min(tgt_row, self.list.count()))
-        self.list.insertItem(insert_row, taken)
-        # Update every tile's stored page-index so future drag-move
-        # operations operate on the correct underlying page (and the
-        # labels track the new sequence).
-        for i in range(self.list.count()):
-            it = self.list.item(i)
-            if it is not None:
-                it.setData(Qt.ItemDataRole.UserRole, i)
-                it.setText(f"Page {i + 1}")
-        # Notify the underlying model so any other attached view
-        # repaints with the new row order.
-        try:
-            m = self.list.model()
-            if m is not None:
-                m.layoutChanged.emit()
-        except Exception:
-            pass
-        try:
-            self.list.viewport().update()
-        except Exception:
-            pass
-
     def _animate_swap_then_apply(self, src_page_1based: int,
                                  target_page_1based: int):
         """Run a brief cross-fade overlay, then commit the swap on disk
@@ -780,6 +837,53 @@ class PagesManager(QDialog):
             self._finalize_swap(src_page_1based, target_page_1based)
             return
 
+        self._start_swap_animation(
+            src_rect, tgt_rect, ghost_src, ghost_tgt,
+            lambda: self._finalize_swap(src_page_1based, target_page_1based))
+
+    def _animate_repopulate_only(self, src_page_1based: int,
+                                 target_page_1based: int):
+        """Same visual overlay as ``_animate_swap_then_apply`` but the
+        on-disk swap is presumed already-committed by the caller.
+
+        Used by the terminal ``swap`` command path in main_window,
+        which writes the swap to disk before invoking us so we must
+        NOT write again. We still animate + repopulate + emit signals
+        so the grid reflects the new state.
+        """
+        src_idx = src_page_1based - 1
+        tgt_idx = target_page_1based - 1
+        src_item = self.list.item(src_idx)
+        tgt_item = self.list.item(tgt_idx)
+        if src_item is None or tgt_item is None:
+            self._repopulate_after_swap(
+                src_page_1based, target_page_1based)
+            return
+        vp_origin = self.list.viewport().mapTo(self.list, QPoint(0, 0))
+        src_rect = QRect(self.list.visualItemRect(src_item).topLeft() + vp_origin,
+                         self.list.visualItemRect(src_item).size())
+        tgt_rect = QRect(self.list.visualItemRect(tgt_item).topLeft() + vp_origin,
+                         self.list.visualItemRect(tgt_item).size())
+
+        ghost_src = self._make_swap_ghost(src_item, src_rect)
+        ghost_tgt = self._make_swap_ghost(tgt_item, tgt_rect)
+        if ghost_src is None or ghost_tgt is None:
+            self._repopulate_after_swap(
+                src_page_1based, target_page_1based)
+            return
+
+        self._start_swap_animation(
+            src_rect, tgt_rect, ghost_src, ghost_tgt,
+            lambda: self._repopulate_after_swap(
+                src_page_1based, target_page_1based))
+
+    def _start_swap_animation(self, src_rect, tgt_rect,
+                              ghost_src, ghost_tgt, on_finish):
+        """Build + start the swap cross-fade group and bind teardown +
+        finish-callback. Shared by ``_animate_swap_then_apply`` and
+        ``_animate_repopulate_only`` so the visual timing lives in one
+        place.
+        """
         # Each ghost moves to the OTHER tile's slot while fading out,
         # so the underlying list item at the destination becomes
         # visible underneath. Group the animations so the cleanup
@@ -807,13 +911,10 @@ class PagesManager(QDialog):
                                  QRect(src_rect.topLeft(), tgt_rect.size())))
         group.addAnimation(_fade(ghost_src))
         group.addAnimation(_fade(ghost_tgt))
-        # Capture ghosts in the closure so the teardown callback can
-        # dispose of them without keeping state on self.
         ghosts = (ghost_src, ghost_tgt)
         group.finished.connect(
             lambda: self._teardown_swap_ghosts(ghosts))
-        group.finished.connect(
-            lambda: self._finalize_swap(src_page_1based, target_page_1based))
+        group.finished.connect(on_finish)
         group.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
 
     def _make_swap_ghost(self, item: QListWidgetItem, at_rect: QRect) -> Optional[QLabel]:
@@ -847,29 +948,52 @@ class PagesManager(QDialog):
         or directly when the swap is invoked from the terminal and no
         animation is desired / possible.
         """
-        if not self.engine or not self.engine.is_open or not self.engine.path:
+        if not self._apply_swap_on_disk(
+                src_page_1based, target_page_1based):
             return
+        self._repopulate_after_swap(src_page_1based, target_page_1based)
+
+    def _apply_swap_on_disk(self, src_page_1based: int,
+                            target_page_1based: int) -> bool:
+        """Write the page swap to disk and reload the engine.
+
+        Returns True if the swap committed; False on any error (the
+        caller is responsible for warning the user). Does NOT
+        repopulate the grid or emit signals — that's the job of
+        ``_repopulate_after_swap``. Splitting the two lets the
+        terminal ``swap`` command (main_window._cmd_swap) skip the
+        on-disk write entirely: it has already written, it just needs
+        the visual / signal side effect.
+        """
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return False
         ok, msg = PDFManipulator.swap_pages(
             self.engine.path, src_page_1based, target_page_1based)
         if not ok:
             QMessageBox.warning(self, "Swap failed", msg)
-            return
-        # Reload the engine from disk so the live document reflects the
-        # new page order. The caller (main window) is responsible for
-        # re-pointing its pdf_viewer at the rebuilt engine.
+            return False
         try:
             self.engine.reload_from_disk()
         except Exception as exc:
             QMessageBox.warning(
                 self, "Reload failed",
                 f"Swap succeeded but reload failed: {exc}")
-            return
+            return False
+        return True
+
+    def _repopulate_after_swap(self, src_page_1based: int,
+                               target_page_1based: int) -> None:
+        """Rebuild the grid (so labels reflect the new sequence) and emit
+        the swap signals.
+
+        Called once per swap, regardless of whether the on-disk write
+        happened in the PM (``_finalize_swap``) or was performed by
+        the caller (terminal ``swap`` command via ``_cmd_swap``).
+        """
         # Repopulate the grid; this re-creates every item with a
         # fresh "Page N" label that matches the new sequence position
         # (because labels are derived from the item's row index in
-        # ``_populate``). The dialog then refreshes the engine's
-        # ``current_page`` pointer so subsequent saves/exports use
-        # the modified page order.
+        # ``_populate``).
         self._populate()
         # Post-swap, the page that WAS at src is now at target, and
         # vice-versa. Emit both so the main window can decide what to
@@ -882,7 +1006,8 @@ class PagesManager(QDialog):
 
     # ----------------------------------------------- terminal-driven swap
     def animate_terminal_swap(self, src_page_1based: int,
-                              target_page_1based: int):
+                              target_page_1based: int,
+                              apply_on_disk: bool = True):
         """Public entry-point used by the terminal ``swap`` command.
 
         Triggers a live animation in the Page Manager UI (when this
@@ -891,16 +1016,30 @@ class PagesManager(QDialog):
         repopulates the grid. If the dialog is hidden / closed the
         caller falls back to ``_finalize_swap`` directly so the
         on-disk swap still goes through.
+
+        ``apply_on_disk`` is False when the caller (typically
+        ``main_window._cmd_swap``) has *already* written the swap to
+        disk — in that case the PM only needs to repopulate + emit
+        signals; double-writing would corrupt the file.
         """
         if src_page_1based == target_page_1based:
             # No-op swap — still let the caller know we're done.
             self.pages_swapped.emit(src_page_1based, target_page_1based)
             return
         if not self.isVisible():
-            self._finalize_swap(src_page_1based, target_page_1based)
+            if apply_on_disk:
+                self._finalize_swap(src_page_1based, target_page_1based)
+            else:
+                self._repopulate_after_swap(
+                    src_page_1based, target_page_1based)
             return
         self._highlight_tiles([src_page_1based, target_page_1based])
-        self._animate_swap_then_apply(src_page_1based, target_page_1based)
+        if apply_on_disk:
+            self._animate_swap_then_apply(
+                src_page_1based, target_page_1based)
+        else:
+            self._animate_repopulate_only(
+                src_page_1based, target_page_1based)
 
     # ----------------------------------------------- terminal-driven move
     def animate_terminal_move(self, src_page_1based: int,
