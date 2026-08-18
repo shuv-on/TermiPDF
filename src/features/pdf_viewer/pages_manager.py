@@ -320,11 +320,8 @@ class PageGridWidget(QListWidget):
         """Set every flag the drag/drop machinery needs.
 
         Called from ``__init__`` and re-issued after the parent flips
-        ``setViewMode(IconMode)`` + ``setMovement(Static)`` because Qt
-        silently downgrades ``dragDropMode`` back to ``DropOnly`` in
-        that combination. The parent calls ``setViewMode`` first,
-        then ``finalize_view_mode`` (this method) so the config is
-        the single source of truth.
+        ``setViewMode(IconMode)`` because Qt silently downgrades
+        ``dragDropMode`` back to ``DropOnly`` in that combination.
         """
         self.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -543,11 +540,11 @@ class PagesManager(QDialog):
         self.list.setViewMode(QListWidget.ViewMode.IconMode)
         self.list.setIconSize(QSize(TILE_W - 24, TILE_H - 50))
         self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.list.setMovement(QListWidget.Movement.Static)
+        # Snap is required — Static blocks ``startDrag`` under
+        # PyQt6 6.10+, so the user's drag never begins.
+        self.list.setMovement(QListWidget.Movement.Snap)
         self.list.setSpacing(8)
-        # Qt's IconMode + Static movement silently downgrades
-        # ``dragDropMode`` back to ``DropOnly``; the widget re-applies
-        # its config so we don't lose drag-drop in the grid.
+        # Re-apply drag config after IconMode (Qt downgrades it).
         self.list._apply_drag_drop_config()
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._on_context_menu)

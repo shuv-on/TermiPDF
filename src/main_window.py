@@ -65,6 +65,16 @@ from shared.utils.theme_manager import ThemeManager
 from shared.utils.color_utils import parse_color
 from shared.utils.path_solver import resolve_user_path, is_pdf_file
 
+# QR popup sizing budget — the dialog has title bar + text section +
+# action row + chrome totalling roughly _QR_DIALOG_CHROME_PX vertically
+# and _QR_DIALOG_HORIZONTAL_MARGIN_PX horizontally. Subtracting those
+# from the available screen rect yields the largest QR pixel size that
+# still fits on small (720p) screens without overflowing.
+_QR_PNG_MAX_PX = 900
+_QR_PNG_MIN_PX = 280
+_QR_DIALOG_CHROME_PX = 380
+_QR_DIALOG_HORIZONTAL_MARGIN_PX = 80
+
 
 def _parse_p_range(token: str):
     """Parse a ``p-N`` or ``p-N-M`` token (as used by ``merge p-1 p-10``).
@@ -2687,6 +2697,14 @@ class TermiPDFWindow(QMainWindow):
 
         try:
             from features.qr_generator.qr_share_dialog import QRShareDialog
+            # Decide the QR's pixel size based on the screen we'll
+            # place the popup on. On 720p laptop screens the full
+            # 900px QR makes the dialog overflow vertically, so we
+            # shrink the QR so the dialog stays inside the available
+            # rect (typically ≈480-540 px). The quiet zone is preserved
+            # because we scale the PNG proportionally before pinning
+            # the label.
+            qr_max_px = self._qr_max_px_for_screen()
             dlg = QRShareDialog(
                 png_bytes, meta.get("encoded_length", len(text)) and
                 (text[:meta.get("encoded_length", len(text))]
@@ -2695,6 +2713,7 @@ class TermiPDFWindow(QMainWindow):
                 truncated=meta.get("truncated", False),
                 original_length=meta.get("original_length", len(text)),
                 encoded_length=meta.get("encoded_length", len(text)),
+                qr_max_px=qr_max_px,
             )
             # Centre the popup on the main window. Without an explicit
             # position Qt sometimes places the dialog off-screen on
@@ -2709,30 +2728,30 @@ class TermiPDFWindow(QMainWindow):
             self._render_result(CommandResult.error(f"QR dialog failed: {exc}"))
 
     def _position_child_on_screen(self, child) -> None:
-        """Place ``child`` so it fits fully inside the parent's available
-        screen rect, centring it on the main window when there's room.
+        """Centre ``child`` on this window, shrunk to fit the active screen.
 
-        Qt's default behaviour for ``child.show()`` with a parent is
-        unpredictable across platforms and monitor configs: the child
-        can land offscreen if the main window straddles two monitors.
-        We compute the intersection of the parent's geometry with the
-        available screen and place the child centred inside it.
+        Shrinks only (never grows) so the dialog's own layout isn't
+        disturbed on screens that already fit it. The child's hard
+        ``minimumSize`` is dropped to (0, 0) on-demand — the dialog's
+        authored floor would otherwise clamp our resize() up and the
+        screen-fit math would no-op.
         """
         try:
-            from PyQt6.QtGui import QGuiApplication
-            parent_geo = self.frameGeometry()
-            screen = QGuiApplication.screenAt(parent_geo.center())
-            if screen is None:
-                screen = QGuiApplication.primaryScreen()
-            avail = screen.availableGeometry() if screen else parent_geo
-            # Clamp the child's size to the available screen so a small
-            # laptop monitor still sees a fully-sized popup.
+            avail = self._available_screen_rect()
+            if avail is None:
+                return
+            if (child.minimumWidth() > avail.width()
+                    or child.minimumHeight() > avail.height()):
+                # Only relax when we actually need to resize below
+                # the authored minimum; the common (fits-already) case
+                # then skips the property churn entirely.
+                child.setMinimumSize(0, 0)
+            child.setMaximumSize(avail.width(), avail.height())
             target_w = min(child.width(), avail.width())
             target_h = min(child.height(), avail.height())
             if (target_w, target_h) != (child.width(), child.height()):
                 child.resize(target_w, target_h)
-            # Centre on the parent's frame centre, then shift inside
-            # the available rect so the title bar stays grabbable.
+            parent_geo = self.frameGeometry()
             cx = parent_geo.center().x() - child.width() // 2
             cy = parent_geo.center().y() - child.height() // 2
             x = max(avail.left(), min(cx, avail.right() - child.width() + 1))
@@ -2742,6 +2761,36 @@ class TermiPDFWindow(QMainWindow):
             # Best-effort — if positioning fails the popup still opens,
             # it just may not be centred.
             pass
+
+    def _available_screen_rect(self):
+        """Return the available geometry of the screen this window sits on.
+
+        Falls back to the primary screen (multi-monitor edge case where
+        the parent's centre is outside any known screen) and to ``None``
+        if no screens are registered. Single source of truth shared by
+        ``_position_child_on_screen`` and ``_qr_max_px_for_screen``.
+        """
+        try:
+            from PyQt6.QtGui import QGuiApplication
+            screen = QGuiApplication.screenAt(self.frameGeometry().center())
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            return screen.availableGeometry() if screen is not None else None
+        except Exception:
+            return None
+
+    def _qr_max_px_for_screen(self) -> int:
+        """Pick a QR pixel size that lets the QR popup fit the active screen."""
+        avail = self._available_screen_rect()
+        if avail is None:
+            return _QR_PNG_MAX_PX
+        budget_h = max(_QR_PNG_MIN_PX,
+                       min(_QR_PNG_MAX_PX,
+                           avail.height() - _QR_DIALOG_CHROME_PX))
+        budget_w = max(_QR_PNG_MIN_PX,
+                       min(_QR_PNG_MAX_PX,
+                           avail.width() - _QR_DIALOG_HORIZONTAL_MARGIN_PX))
+        return min(budget_h, budget_w)
 
     def _copy_page_text(self):
         if not self.engine.is_open:

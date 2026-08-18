@@ -458,20 +458,19 @@ def main() -> int:
     window.pdf_viewer.refresh()
     app.processEvents()
 
-    # 20b. QR popup dimensions: card-style dialog with a big-enough QR
-    # for phone scanning (bumped from 520×640 → 720×820 because the user
-    # reported the smaller QR was hard to scan with a phone camera).
+    # 20b. QR popup dimensions: callers can request a smaller QR via
+    # ``qr_max_px`` so the dialog fits on 720p laptop screens.
     from features.qr_generator.qr_share_dialog import QRShareDialog
     sample_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
     dlg = QRShareDialog(sample_png, "test", parent=window)
-    check("GUI: QR popup min width >= 640px",
-          dlg.minimumWidth() >= 640,
+    check("GUI: QR popup min width >= 360px",
+          dlg.minimumWidth() >= 360,
           f"minWidth={dlg.minimumWidth()}")
-    check("GUI: QR popup min height >= 720px",
-          dlg.minimumHeight() >= 720,
+    check("GUI: QR popup min height >= 420px",
+          dlg.minimumHeight() >= 420,
           f"minHeight={dlg.minimumHeight()}")
-    check("GUI: QR popup QR_MIN_PX >= 350 (roomy scan size)",
-          QRShareDialog.QR_MIN_PX >= 350,
+    check("GUI: QR popup QR_MIN_PX >= 280 (roomy scan size)",
+          QRShareDialog.QR_MIN_PX >= 280,
           f"QR_MIN_PX={QRShareDialog.QR_MIN_PX}")
     # Window flags: standard native frame (no FramelessWindowHint) so
     # close / minimize / maximize / system-menu buttons appear.

@@ -16,6 +16,8 @@ so the dialog looks at home in both dark and light palettes.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QPixmap, QImage, QGuiApplication, QColor, QPainter, QFont
 from PyQt6.QtWidgets import (
@@ -58,7 +60,8 @@ class QRShareDialog(QDialog):
     # ------------------------------------------------------------------
     def __init__(self, png_bytes: bytes, text: str, parent=None,
                  truncated: bool = False, original_length: int = 0,
-                 encoded_length: int = 0):
+                 encoded_length: int = 0,
+                 qr_max_px: Optional[int] = None):
         # Use the default dialog window type so the platform's native
         # title bar with close / minimize / maximize / system-menu
         # buttons is shown. The user explicitly asked for a standard
@@ -69,6 +72,12 @@ class QRShareDialog(QDialog):
         self._truncated = truncated
         self._original_length = original_length or len(text)
         self._encoded_length = encoded_length or len(text)
+        # Caller can ask the dialog to scale its QR to fit a target
+        # display size — main_window passes the smaller of the screen's
+        # available height / width so the popup fits on 720p laptop
+        # screens without cropping the QR off-screen. Falls back to
+        # the full native QR size when ``qr_max_px`` is None.
+        self._qr_max_px = qr_max_px
         self.setWindowTitle("Share as QR")
         self.setModal(False)
         # Explicitly request standard buttons so they're visible on
@@ -77,8 +86,12 @@ class QRShareDialog(QDialog):
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
         self.setWindowFlag(Qt.WindowType.WindowSystemMenuHint, True)
-        self.setMinimumSize(720, 720)
-        self.resize(820, 880)
+        # Compact minimum so the popup fits on 720p laptop screens.
+        # The QR label is allowed to scale down (via ``qr_max_px``)
+        # when the screen is tight, which keeps the dialog under
+        # 540px tall — well inside a typical 768px display.
+        self.setMinimumSize(420, 480)
+        self.resize(560, 640)
         self._build_ui()
         self._apply_theme()
         # No pop-in animation — instant cut, matching the no-animation
@@ -122,25 +135,31 @@ class QRShareDialog(QDialog):
             qr_label = QLabel("(failed to render QR)")
             qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         else:
-            # The QR image is delivered with a built-in 4-module quiet
-            # zone (the white border the spec requires for scanners to
-            # find the corner finder patterns). The dialog MUST preserve
-            # that quiet zone — losing even a few pixels of it makes a
-            # phone camera struggle to detect the orientation.
-            #
-            # Two rules to keep it intact:
-            #   1. Do NOT let Qt scale the pixmap down to fit the label
-            #      — that eats the quiet zone. We set the label's fixed
-            #      size to the pixmap's native size so the widget is
-            #      exactly the size of the image.
-            #   2. Do NOT apply `padding` on the QLabel via QSS — the
-            #      padding is drawn *inside* the label's content rect
-            #      and Qt centers the pixmap within the remaining area,
-            #      which (depending on aspect ratio) clips the edges.
-            #      The white "frame" you see in the popup is the QR's
-            #      own quiet zone, not a CSS border.
-            target_px = self.QR_MIN_PX
-            if img.width() < target_px or img.height() < target_px:
+            # The QR image carries a built-in quiet zone; the label is
+            # pinned to the pixmap's native size below so any Qt-side
+            # scaling would clip that border. We therefore pre-scale
+            # the image to the right pixel size BEFORE pinning:
+            #  - upscale to QR_MIN_PX when the PNG is smaller (small
+            #    payloads render at low resolution by default), and
+            #  - downscale to ``qr_max_px`` when the caller asked for
+            #    a tighter fit (e.g. small laptop screen).
+            # The two are collapsed into a single ``scaled()`` call so
+            # we never run the conversion twice. Upscale only applies
+            # when the PNG is below QR_MIN_PX; downscale only when the
+            # PNG exceeds qr_max_px — we never force a re-scale when
+            # the source already satisfies both bounds.
+            cur_w = img.width()
+            cur_h = img.height()
+            target_px = None
+            if cur_w < self.QR_MIN_PX or cur_h < self.QR_MIN_PX:
+                target_px = self.QR_MIN_PX
+            if (self._qr_max_px is not None
+                    and (cur_w > self._qr_max_px
+                         or cur_h > self._qr_max_px)):
+                target_px = (self._qr_max_px
+                             if target_px is None
+                             else min(target_px, self._qr_max_px))
+            if target_px is not None:
                 img = img.scaled(
                     target_px, target_px,
                     Qt.AspectRatioMode.KeepAspectRatio,
@@ -150,11 +169,9 @@ class QRShareDialog(QDialog):
             self._qr_pixmap = pix
             qr_label = QLabel()
             qr_label.setPixmap(pix)
-            # Pin the label to the pixmap's native size. With
-            # setFixedSize + setScaledContents(False) Qt does NOT scale
-            # the pixmap — it draws it at native size and the label
-            # border becomes the visual frame. Any padding in the QSS
-            # would clip the quiet zone, so we don't add any.
+            # Pin the label to the pixmap's native size; setScaledContents
+            # off so Qt does NOT scale the pixmap on paint (which would
+            # crop the quiet zone).
             qr_label.setFixedSize(pix.size())
             qr_label.setScaledContents(False)
             qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
