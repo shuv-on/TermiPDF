@@ -9,6 +9,7 @@ Responsibilities:
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple
@@ -383,6 +384,77 @@ class PDFViewerUI(QWidget):
         # Friendly placeholder
         self._set_placeholder()
         self.mode = CanvasMode.VIEW  # sets cursor
+
+        # ----- Image drag-drop ---------------------------------------------
+        # The viewer accepts drops of one-or-more image files; main_window
+        # builds a multi-page PDF from them and auto-opens it. We only
+        # accept drops here — the actual conversion lives in
+        # MainWindow._handle_image_drop.
+        self.setAcceptDrops(True)
+        self._image_drop_handler = None  # injected by main_window
+
+    def set_image_drop_handler(self, callable_):
+        """Inject the function main_window wants invoked on image drop.
+
+        The handler signature is
+        ``handler(absolute_paths: list[str]) -> None``.
+        """
+        self._image_drop_handler = callable_
+
+    # ----- Image drag-drop events -----------------------------------------
+    # PyQt6's drag-and-drop events are dispatched to the widget that
+    # has ``setAcceptDrops(True)`` — that's us. We accept the drop only
+    # when every URL is a local file with a recognized image
+    # extension; non-image drops fall through (so a stray PDF drop is
+    # still handled by main_window's main drop handler if any).
+    _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif",
+                   ".tiff", ".webp", ".avif", ".heic", ".heif", ".ppm",
+                   ".pgm", ".pbm")
+
+    def dragEnterEvent(self, event):
+        from PyQt6.QtCore import QUrl
+        if not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        paths = [u.toLocalFile() for u in event.mimeData().urls()]
+        # Accept only if every URL is a local file with an image ext.
+        if not paths or not all(p and os.path.isfile(p)
+                               and p.lower().endswith(self._IMAGE_EXTS)
+                               for p in paths):
+            event.ignore()
+            return
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        # Required so the drop is accepted (Qt only fires drop on the
+        # widget that accepts the move too).
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        from PyQt6.QtCore import QUrl
+        if not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        paths = []
+        for u in event.mimeData().urls():
+            local = u.toLocalFile()
+            if local and local.lower().endswith(self._IMAGE_EXTS):
+                paths.append(os.path.abspath(local))
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        handler = getattr(self, "_image_drop_handler", None)
+        if handler is not None:
+            try:
+                handler(paths)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error(
+                    "image drop handler raised: %s", exc)
 
     def _set_placeholder(self):
         pm = QPixmap(800, 1000)

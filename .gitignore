@@ -1,1 +1,4 @@
-docs
+# docs/ is now tracked (it ships screenshots + screenshot index).
+# Ignore only the build artefact that capture_screenshots.py writes
+# when synthesizing the image-PDF in scenario_11.
+docs/screenshots/_assets/_seed.png

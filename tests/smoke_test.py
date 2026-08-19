@@ -566,6 +566,132 @@ def main() -> int:
     check("viewer_ui exposes SELECT mode",
           "SELECT" in viewer_ui_src and "select" in viewer_ui_src)
 
+    # --------------------------------------------- T16 — Image → PDF
+    section("T16 — Image → PDF conversion (drag-drop pipeline)")
+    # Build three solid-color PNGs of distinct sizes and colors.
+    from PIL import Image as _PILImage
+    img_dir = tempfile.mkdtemp(prefix="termipdf_img2pdf_")
+    img_paths = []
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    sizes = [(120, 80), (200, 150), (60, 200)]  # different aspect ratios
+    try:
+        for (rgb, (w, h)) in zip(colors, sizes):
+            p = os.path.join(img_dir, f"img_{rgb[0]}_{rgb[1]}_{rgb[2]}.png")
+            _PILImage.new("RGB", (w, h), rgb).save(p)
+            img_paths.append(os.path.abspath(p))
+        check("built 3 test PNGs", len(img_paths) == 3 and
+              all(os.path.isfile(p) for p in img_paths))
+
+        # PyMuPDF opens each PNG as a 1-page document whose MediaBox is
+        # the image's pixel size mapped through 150 DPI (a PNG is treated
+        # as 150 DPI by default). Capture the exact per-image pt size for
+        # later assertions so we don't hard-code the conversion ratio.
+        img_pt_sizes = []
+        for p in img_paths:
+            d_im = fitz.open(p)
+            r = d_im[0].rect
+            img_pt_sizes.append((r.width, r.height))
+            d_im.close()
+
+        out_pdf = os.path.join(img_dir, "out.pdf")
+        # Happy path: 3 images → 3-page PDF.
+        ok, msg = PDFManipulator.images_to_pdf(img_paths, out_pdf)
+        check("images_to_pdf returned ok", ok, msg)
+        check("output PDF exists", os.path.isfile(out_pdf))
+        doc = fitz.open(out_pdf)
+        try:
+            check("output PDF has 3 pages", len(doc) == 3,
+                  f"got {len(doc)} pages")
+            for idx, (imgw, imgh) in enumerate(img_pt_sizes):
+                page = doc[idx]
+                rect = page.rect
+                page_w = rect.width
+                page_h = rect.height
+                # Page is sized as image_pt + 2*margin (no upscaling),
+                # so PDF page ≥ image_pt - margin (a small loss is
+                # acceptable when image_pt < 2*margin).
+                check(f"page {idx+1} fits its image",
+                      page_w >= imgw - 1 and page_h >= imgh - 1,
+                      f"page={page_w:.0f}x{page_h:.0f}pt "
+                      f"image_pt={imgw:.0f}x{imgh:.0f}pt")
+                images = page.get_images(full=True)
+                check(f"page {idx+1} contains an embedded image",
+                      len(images) >= 1)
+        finally:
+            doc.close()
+
+        # Re-open the produced PDF via ViewerEngine to make sure it's
+        # a valid TermiPDF-readable document.
+        eng = ViewerEngine()
+        try:
+            ok_open, omsg = eng.open(out_pdf)
+            check("ViewerEngine opens the image-PDF",
+                  ok_open and eng.page_count == 3,
+                  f"page_count={eng.page_count if ok_open else 'n/a'}")
+        finally:
+            eng.close()
+
+        # Empty input → error.
+        ok, msg = PDFManipulator.images_to_pdf([], os.path.join(img_dir, "x.pdf"))
+        check("empty input returns failure", not ok)
+
+        # Missing file → user-facing error mentions the filename.
+        ok, msg = PDFManipulator.images_to_pdf(
+            [img_paths[0], "/nonexistent/missing.png"],
+            os.path.join(img_dir, "x.pdf"))
+        check("missing file returns failure", not ok)
+        check("missing-file error mentions the name",
+              "missing" in msg.lower() or "not found" in msg.lower(), msg)
+
+        # Custom margin: a smaller margin produces a smaller page
+        # (the page is sized to img_pt + 2*margin_pt, so reducing
+        # margin shrinks the page uniformly).
+        out_pdf_small = os.path.join(img_dir, "out_small.pdf")
+        ok, msg = PDFManipulator.images_to_pdf(
+            [img_paths[0]], out_pdf_small, margin_pt=2.0)
+        check("custom-margin small conversion works", ok, msg)
+        out_pdf_big = os.path.join(img_dir, "out_big.pdf")
+        ok, msg = PDFManipulator.images_to_pdf(
+            [img_paths[0]], out_pdf_big, margin_pt=72.0)
+        check("custom-margin big conversion works", ok, msg)
+        d_small = fitz.open(out_pdf_small)
+        d_big = fitz.open(out_pdf_big)
+        try:
+            check("larger margin produces larger page",
+                  d_big[0].rect.width >= d_small[0].rect.width + 1,
+                  f"big={d_big[0].rect.width:.0f}pt "
+                  f"small={d_small[0].rect.width:.0f}pt")
+        finally:
+            d_small.close()
+            d_big.close()
+
+        # ---- GUI integration: drop handler is wired & supported MIME types
+        # are recognized. We can't trigger a real QDropEvent without a
+        # running QApplication, but we can verify the handler contract.
+        viewer_ui_src_full = (PROJECT_ROOT / "src" / "features" / "pdf_viewer"
+                              / "viewer_ui.py").read_text()
+        check("viewer_ui has set_image_drop_handler",
+              "set_image_drop_handler" in viewer_ui_src_full)
+        check("viewer_ui has dropEvent override",
+              "def dropEvent" in viewer_ui_src_full)
+        check("viewer_ui recognizes .png/.jpg",
+              ".png" in viewer_ui_src_full and ".jpg" in viewer_ui_src_full)
+        check("viewer_ui recognizes .webp/.avif",
+              ".webp" in viewer_ui_src_full and ".avif" in viewer_ui_src_full)
+
+        # main_window exposes the handler.
+        main_window_src = (PROJECT_ROOT / "src" / "main_window.py").read_text()
+        check("main_window has _handle_image_drop",
+              "_handle_image_drop" in main_window_src)
+        check("main_window wires set_image_drop_handler injection",
+              "set_image_drop_handler(self._handle_image_drop)" in main_window_src)
+        check("main_window registers image2pdf command",
+              'register("image2pdf"' in main_window_src)
+        check("main_window registers img2pdf alias",
+              'register("img2pdf"' in main_window_src)
+    finally:
+        shutil.rmtree(img_dir, ignore_errors=True)
+
     # --------------------------------------------------------------- Summary
     print()
     print("=" * 50)

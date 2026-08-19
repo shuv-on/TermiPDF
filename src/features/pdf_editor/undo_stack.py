@@ -412,7 +412,18 @@ class UndoStack:
                     cache_pdf = payload.get("cache_pdf")
                     if not cache_pdf or not os.path.isfile(cache_pdf):
                         return False, "page_op delete: cache PDF missing"
-                    tmp = path + ".undodelete.tmp.pdf"
+                    # Use an unguessable tmp filename in the source
+                    # PDF's directory so the atomic os.replace below
+                    # is on the same filesystem.
+                    import tempfile as _tempfile
+                    try:
+                        _fd, tmp = _tempfile.mkstemp(
+                            prefix=".termipdf-undodelete-",
+                            suffix=".pdf",
+                            dir=os.path.dirname(os.path.abspath(path)) or ".")
+                        os.close(_fd)
+                    except OSError:
+                        tmp = path + ".undodelete.tmp.pdf"
                     ok, msg = PDFManipulator.merge_pdfs([path, cache_pdf],
                                                         tmp)
                     if not ok:

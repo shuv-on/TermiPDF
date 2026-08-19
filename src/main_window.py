@@ -21,7 +21,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QPointF, QSize
 from PyQt6.QtGui import (
@@ -718,6 +718,8 @@ class TermiPDFWindow(QMainWindow):
             return
         self.engine = session["engine"]
         self.pdf_viewer = session["pdf_viewer"]
+        # Wire image drag-drop → image-to-PDF conversion.
+        self.pdf_viewer.set_image_drop_handler(self._handle_image_drop)
         self.annot = session["annot"]
         self.editor = session["editor"]
         # Re-bind the shared undo stack to the active viewer so undo/redo
@@ -1053,6 +1055,9 @@ class TermiPDFWindow(QMainWindow):
         self.parser.register("delete", self._cmd_delete)
         self.parser.register("rotate", self._cmd_rotate)
         self.parser.register("swap", self._cmd_swap)
+        # Image→PDF conversion: `image2pdf <paths...>` or `img2pdf <paths...>`.
+        self.parser.register("image2pdf", self._cmd_image2pdf)
+        self.parser.register("img2pdf", self._cmd_image2pdf)
         # QR / stamps
         self.parser.register("qr", self._cmd_qr)
         self.parser.register("stamp-capture", self._cmd_stamp_capture)
@@ -1125,6 +1130,70 @@ class TermiPDFWindow(QMainWindow):
         if not positional:
             return CommandResult.error("Usage: open <path-to-pdf>")
         return self._do_open(resolve_user_path(" ".join(positional)))
+
+    # ------------------------------------------------- image → PDF
+    def _handle_image_drop(self, paths: List[str]) -> None:
+        """Drag-drop handler injected into PDFViewerUI.
+
+        Prompts for a save location, builds a multi-page PDF from the
+        dropped images (one per page, fit-to-page), saves it, and
+        auto-opens the new PDF in TermiPDF so the user gets the full
+        editor / annotator / Pages Manager immediately.
+        """
+        if not paths:
+            return
+        # Suggest a default filename based on the first image.
+        first = os.path.basename(paths[0])
+        stem = os.path.splitext(first)[0] or "images"
+        suggested = os.path.join(os.path.expanduser("~"),
+                                 f"{stem}.pdf")
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save images as PDF",
+            suggested,
+            "PDF files (*.pdf)")
+        if not out_path:
+            return  # user cancelled
+        if not out_path.lower().endswith(".pdf"):
+            out_path += ".pdf"
+        ok, msg = PDFManipulator.images_to_pdf(paths, out_path)
+        if not ok:
+            QMessageBox.warning(self, "Image → PDF failed", msg)
+            self._render_result(CommandResult.error(msg))
+            return
+        self._render_result(CommandResult.print(msg))
+        # Auto-open the new PDF — gives the user the full editor +
+        # annotator + Pages Manager flow on the result.
+        result = self._do_open(out_path)
+        if result and result.action == "error":
+            QMessageBox.warning(self, "Could not open new PDF",
+                                result.message)
+
+    def _cmd_image2pdf(self, args):
+        """Convert one or more image files to a single multi-page PDF.
+
+        Usage:
+            image2pdf <img1> <img2> ...
+            img2pdf <img1> <img2> ...      (alias)
+
+        Each image becomes one PDF page (fit-to-page with margins).
+        Prompts for a save location.
+        """
+        if not args:
+            return CommandResult.error(
+                "Usage: image2pdf <image1> [image2 ...]")
+        # Resolve every argument; support comma-separated lists too.
+        paths: List[str] = []
+        for tok in args:
+            for piece in tok.split(","):
+                p = resolve_user_path(piece.strip())
+                if p and os.path.isfile(p):
+                    paths.append(os.path.abspath(p))
+        if not paths:
+            return CommandResult.error(
+                "None of the supplied paths point to an existing file.")
+        self._handle_image_drop(paths)
+        return CommandResult.print(
+            f"Converted {len(paths)} image(s) to PDF.")
 
     def _cmd_close(self, _args):
         self.engine.close()
@@ -2498,11 +2567,22 @@ class TermiPDFWindow(QMainWindow):
         import shutil as _shutil
         from PyQt6.QtGui import QGuiApplication
 
-        # Save to a stable temp path so we can read it back after the
-        # OS tool exits.
-        out_dir = os.path.expanduser("~")
+        # Save to a per-user cache dir (XDG_CACHE_HOME on Linux,
+        # platform default elsewhere) so we comply with sandboxing
+        # rules — never litter $HOME with screenshot files. Filename
+        # is timestamped + PID-suffixed to avoid collisions between
+        # concurrent invocations.
+        import tempfile as _tempfile
+        cache_home = os.environ.get("XDG_CACHE_HOME", "").strip()
+        out_dir = (cache_home if cache_home
+                   else _tempfile.gettempdir())
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError:
+            out_dir = _tempfile.mkdtemp(prefix="termipdf_screenshot_")
         ts = time.strftime("%Y%m%d-%H%M%S")
-        out_path = os.path.join(out_dir, f"termipdf-screenshot-{ts}.png")
+        out_path = os.path.join(
+            out_dir, f"termipdf-screenshot-{ts}-{os.getpid()}.png")
 
         # Detect the platform's native screenshot tool. Order =
         # preferred-first. Each entry: (program-name, argv-template).

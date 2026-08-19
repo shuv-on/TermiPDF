@@ -4,9 +4,29 @@ manipulation.py — Page-level PDF operations: extract, merge, delete, rotate.
 from __future__ import annotations
 
 import os
+import tempfile
 from typing import Optional
 
 import fitz
+
+
+def _safe_tmp_path(src_path: str) -> str:
+    """Return a unique tmp path for an in-place rewrite of ``src_path``.
+
+    Uses ``tempfile.mkstemp`` so the filename is unguessable and lives
+    in the same directory as the source (so the atomic ``os.replace``
+    below is on the same filesystem). Falls back to
+    ``src_path + '.tmp.pdf'`` if the directory is read-only.
+    """
+    base_dir = os.path.dirname(os.path.abspath(src_path)) or "."
+    try:
+        fd, path = tempfile.mkstemp(
+            prefix=".termipdf-", suffix=".pdf", dir=base_dir)
+        os.close(fd)
+        return path
+    except OSError:
+        # Last-ditch: predictable name (still better than nothing).
+        return src_path + ".tmp.pdf"
 
 
 class PDFManipulator:
@@ -37,6 +57,91 @@ class PDFManipulator:
             return True, f"Extracted pages {from_page}-{to_page} → {out_path}"
         except Exception as exc:
             return False, f"Extract failed: {exc}"
+
+    # ----------------------------------------------------- images → PDF
+    @staticmethod
+    def images_to_pdf(image_paths: list[str], out_path: str,
+                       *, margin_pt: float = 18.0) -> tuple[bool, str]:
+        """Convert a sequence of image files into a multi-page PDF.
+
+        Each image becomes one PDF page, sized to the image's aspect
+        ratio (so there's no whitespace wasted on tall/wide photos).
+        The image is fitted inside the page with a uniform
+        ``margin_pt`` margin on all four sides — the user can always
+        crop / re-layout later via the existing editor.
+
+        ``out_path`` is the destination PDF. Returns ``(ok, message)``.
+        Raises nothing — all errors are reported via the return tuple
+        so the GUI can show them in the status bar.
+
+        Supported image formats: anything PyMuPDF can rasterize at
+        load time — PNG, JPEG, BMP, TIFF, GIF (first frame), WebP,
+        AVIF, etc.
+        """
+        if not image_paths:
+            return False, "No images supplied."
+        try:
+            out_doc = fitz.open()
+            placed = 0
+            for img_path in image_paths:
+                if not os.path.isfile(img_path):
+                    out_doc.close()
+                    return False, f"Image not found: {img_path}"
+                # ``fitz.open`` handles every supported raster format
+                # (PNG, JPEG, BMP, TIFF, GIF, WebP, AVIF, …) and
+                # returns a 1-page Document we can append.
+                try:
+                    img_doc = fitz.open(img_path)
+                except Exception as exc:
+                    out_doc.close()
+                    return False, (f"Could not read {os.path.basename(img_path)}: "
+                                   f"{exc}")
+                if len(img_doc) == 0:
+                    img_doc.close()
+                    out_doc.close()
+                    return False, (f"{os.path.basename(img_path)} has no pages.")
+                page = img_doc[0]
+                # Use the image's own pixel size to set the PDF page
+                # rect (1 pt = 1/72 inch; we keep px:pt = 1:1 so the
+                # page size matches the image exactly, then shrink
+                # slightly for the margin).
+                pix = page.get_pixmap(dpi=72)
+                img_w_pt = pix.width
+                img_h_pt = pix.height
+                img_doc.close()
+                # Page rect = image rect shrunk by 2*margin on each
+                # axis, but if the image is smaller than 2*margin we
+                # skip the inset.
+                page_w = max(img_w_pt + 2 * margin_pt, 2 * margin_pt + 10)
+                page_h = max(img_h_pt + 2 * margin_pt, 2 * margin_pt + 10)
+                # Clamp to sane upper bounds so a 50000px photo doesn't
+                # produce a 50000pt PDF page.
+                page_w = min(page_w, 14400)  # 200 inches
+                page_h = min(page_h, 14400)
+                pdf_page = out_doc.new_page(width=page_w, height=page_h)
+                # Place the image centered in the available rect.
+                avail_w = page_w - 2 * margin_pt
+                avail_h = page_h - 2 * margin_pt
+                # Scale to fit while preserving aspect ratio.
+                scale = min(avail_w / img_w_pt if img_w_pt else 1.0,
+                            avail_h / img_h_pt if img_h_pt else 1.0,
+                            1.0)  # never upscale
+                draw_w = img_w_pt * scale
+                draw_h = img_h_pt * scale
+                x0 = (page_w - draw_w) / 2
+                y0 = (page_h - draw_h) / 2
+                rect = fitz.Rect(x0, y0, x0 + draw_w, y0 + draw_h)
+                pdf_page.insert_image(rect, filename=img_path)
+                placed += 1
+            if placed == 0:
+                out_doc.close()
+                return False, "No images were placed."
+            out_doc.save(out_path, garbage=4, deflate=True)
+            out_doc.close()
+            return True, (f"Created {placed}-page PDF at {out_path} "
+                          f"(fit-to-page, {margin_pt:.0f}pt margins).")
+        except Exception as exc:
+            return False, f"Image→PDF conversion failed: {exc}"
 
     # ------------------------------------------------------------- merge
     @staticmethod
@@ -82,7 +187,7 @@ class PDFManipulator:
             doc.delete_page(page_num - 1)
             if out_path is None:
                 # In-place: write to tmp then atomically replace.
-                tmp = src_path + ".tmp.pdf"
+                tmp = _safe_tmp_path(src_path)
                 doc.save(tmp, garbage=4, deflate=True)
                 doc.close()
                 os.replace(tmp, src_path)
@@ -111,7 +216,7 @@ class PDFManipulator:
             page = doc.load_page(page_num - 1)
             page.set_rotation((page.rotation + angle) % 360)
             if out_path is None:
-                tmp = src_path + ".tmp.pdf"
+                tmp = _safe_tmp_path(src_path)
                 doc.save(tmp, garbage=4, deflate=True)
                 doc.close()
                 os.replace(tmp, src_path)
@@ -154,7 +259,7 @@ class PDFManipulator:
                 new_doc.insert_pdf(doc, from_page=int(p) - 1,
                                    to_page=int(p) - 1)
             if out_path is None:
-                tmp = src_path + ".tmp.pdf"
+                tmp = _safe_tmp_path(src_path)
                 new_doc.save(tmp, garbage=4, deflate=True)
                 new_doc.close()
                 doc.close()
