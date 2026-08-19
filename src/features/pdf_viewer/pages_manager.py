@@ -94,6 +94,14 @@ def _placeholder_tile(w: int, h: int, text: str = "…",
     return pm
 
 
+def _silent_undo_pusher(*args, **kwargs):
+    """Module-level no-op used as the Pages Manager's undo_pusher when
+    no MainWindow is connected (standalone test usage). Matches the
+    signature used by the real undo_pusher so call sites don't need to
+    branch on whether one is configured."""
+    return None
+
+
 class MoveToDialog(QDialog):
     """Small "Move Page To…" dialog launched from the Pages Manager.
 
@@ -315,6 +323,12 @@ class PageGridWidget(QListWidget):
         # reference — tests can swap the runner in-place by mutating
         # ``pm._command_runner`` and we don't need to be re-wired.
         self._apply_drag_drop_config()
+        # Last cursor shape applied via ``QDragMoveEvent.setCursor``.
+        # ``QDragEnterEvent`` doesn't expose ``setCursor``, so we have
+        # to set it on every move tick; this cache lets us skip the
+        # call when the shape hasn't changed (modifier release between
+        # ticks, mid-drag oscillation, etc.).
+        self._last_drag_cursor: Qt.CursorShape | None = None
 
     def _apply_drag_drop_config(self) -> None:
         """Set every flag the drag/drop machinery needs.
@@ -343,6 +357,16 @@ class PageGridWidget(QListWidget):
                 "command runner.")
         return parent._command_runner(raw)
 
+    def _run_modifier_drop(self, label: str, fn) -> None:
+        """Call ``fn`` (the parent PagesManager reorder path) with the
+        shared try/except + QMessageBox pattern used by the swap path.
+        ``label`` is the failure prefix ("Swap" / "Reorder")."""
+        try:
+            fn()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Drag-drop failed", f"{label} failed: {exc}")
+
     def dropEvent(self, event):
         # Source index (0-based): the row currently selected. The
         # ``InternalMove`` machinery keeps the source tile flagged as
@@ -365,25 +389,37 @@ class PageGridWidget(QListWidget):
             event.ignore()
             return
 
-        # 0-based rows → 1-based page numbers, matching the terminal's
-        # ``swap`` command syntax.
         from_page = src_row + 1
         to_page = tgt_row + 1
-
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
 
-        # Hand the swap to the terminal backend. The string is the
-        # same one the user would type at the prompt, so we get all
-        # the validation + animation + engine reload + status-bar
-        # feedback for free. The backend is responsible for repopulating
-        # the grid when the swap finalizes (via the animation pipeline
-        # or, in the silent fallback, immediately).
-        try:
-            self._command_runner(f"swap {from_page} {to_page}")
-        except Exception as exc:
-            QMessageBox.warning(
-                self, "Drag-drop failed", f"Swap failed: {exc}")
+        # Branch on modifiers — exactly one path runs per drop, so
+        # swap and reorder signals never fire together for the same
+        # drop. The swap path goes through the terminal command
+        # backend; the reorder paths go straight to
+        # ``PagesManager.animate_terminal_move`` (the same entry-point
+        # the typed-terminal reorder uses).
+        modifiers = event.modifiers()
+        parent = self.parent()
+        if parent is None:
+            event.ignore()
+            return
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            self._run_modifier_drop(
+                "Reorder",
+                lambda: parent.animate_terminal_move(
+                    from_page, "before", to_page))
+        elif modifiers & Qt.KeyboardModifier.ControlModifier:
+            self._run_modifier_drop(
+                "Reorder",
+                lambda: parent.animate_terminal_move(
+                    from_page, "after", to_page))
+        else:
+            self._run_modifier_drop(
+                "Swap",
+                lambda: self._command_runner(
+                    f"swap {from_page} {to_page}"))
 
     # ``dragEnterEvent`` / ``dragMoveEvent`` keep Qt's standard
     # "accept MoveAction" behaviour so the dropEvent actually fires
@@ -405,11 +441,35 @@ class PageGridWidget(QListWidget):
                 or any(mime.hasFormat(f) for f in mime.formats())):
             event.acceptProposedAction()
 
+    # ``QDragMoveEvent.setCursor`` is the only valid cursor hook —
+    # ``QDragEnterEvent`` and ``QDragLeaveEvent`` don't expose it.
+    # We set on every move tick but cache the last shape so we skip
+    # the call when it hasn't changed (mid-drag oscillation, modifier
+    # release between ticks, etc.).
+
     def dragEnterEvent(self, event):
         self._accept_drag(event)
 
     def dragMoveEvent(self, event):
+        if (event.modifiers()
+                & (Qt.KeyboardModifier.ShiftModifier
+                   | Qt.KeyboardModifier.ControlModifier)):
+            desired = Qt.CursorShape.DragCopyCursor
+        else:
+            desired = None
+        if desired is not self._last_drag_cursor:
+            if desired is None:
+                event.setCursor(Qt.CursorShape.ArrowCursor)
+            else:
+                event.setCursor(desired)
+            self._last_drag_cursor = desired
         self._accept_drag(event)
+
+    def dragLeaveEvent(self, event):
+        # QDragLeaveEvent has no modifiers() — reset our cursor cache
+        # so the next drag picks up fresh state from its first move.
+        self._last_drag_cursor = None
+        super().dragLeaveEvent(event)
 
 
 class PagesManager(QDialog):
@@ -428,7 +488,7 @@ class PagesManager(QDialog):
     pages_swapped = pyqtSignal(int, int)
 
     def __init__(self, engine: ViewerEngine, parent=None,
-                 command_runner=None):
+                 command_runner=None, undo_pusher=None):
         super().__init__(parent)
         self.engine = engine
         # ``command_runner`` is injected by main_window so drag-drop
@@ -439,6 +499,14 @@ class PagesManager(QDialog):
         self._command_runner = (command_runner
                                 if command_runner is not None
                                 else self._silent_command_runner)
+        # ``undo_pusher`` is the MainWindow's UndoStack helper. The PM
+        # calls it BEFORE each on-disk page mutation so undo/redo
+        # (Ctrl+Z / Ctrl+Y) can reverse toolbar / right-click / drag
+        # reorder actions as well as terminal ones. Falls back to a
+        # no-op when the dialog is used standalone (no MainWindow).
+        self._undo_pusher = (undo_pusher
+                             if undo_pusher is not None
+                             else _silent_undo_pusher)
         self.setWindowTitle("Pages Manager")
         self.setMinimumSize(640, 480)
         self.resize(960, 640)
@@ -746,7 +814,8 @@ class PagesManager(QDialog):
     # ------------------------------------------------------ public API
     def get_selected_pages(self) -> List[int]:
         """Return 1-based page numbers for the currently-selected tiles."""
-        return self.list.selected_pages_1based()
+        return [self.list.row(item) + 1
+                for item in self.list.selectedItems()]
 
     def select_pages(self, pages_1based: Sequence[int]) -> None:
         """Programmatically select a list of 1-based pages (used by terminal)."""
@@ -948,6 +1017,15 @@ class PagesManager(QDialog):
         if not self._apply_swap_on_disk(
                 src_page_1based, target_page_1based):
             return
+        # Push the undo entry now that the on-disk write has committed.
+        # The pusher is no-op when no MainWindow is attached, so the
+        # standalone-PM tests don't need a stack.
+        try:
+            self._undo_pusher("swap",
+                              src_page_1based=src_page_1based,
+                              target_page_1based=target_page_1based)
+        except Exception:
+            pass
         self._repopulate_after_swap(src_page_1based, target_page_1based)
 
     def _apply_swap_on_disk(self, src_page_1based: int,
@@ -1167,6 +1245,13 @@ class PagesManager(QDialog):
         if not ok:
             QMessageBox.warning(self, "Reorder failed", msg)
             return
+        # Push the undo entry now that the on-disk write committed.
+        try:
+            self._undo_pusher("move",
+                              src_page_1based=src_page_1based,
+                              target_slot=target_slot)
+        except Exception:
+            pass
         try:
             self.engine.reload_from_disk()
         except Exception as exc:
@@ -1335,8 +1420,15 @@ class PagesManager(QDialog):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        # Delete from highest to lowest so indices stay valid.
+        # Delete from highest to lowest so indices stay valid. Push a
+        # separate undo entry per deleted page so each Ctrl+Z reverses
+        # one delete (in reverse order, matching the deletion order).
+        # The pusher caches the page content BEFORE we delete it.
         for p in sorted(pages, reverse=True):
+            try:
+                self._undo_pusher("delete", page_1based=p)
+            except Exception:
+                pass
             ok, msg = PDFManipulator.delete_page(self.engine.path, p)
             if not ok:
                 QMessageBox.warning(self, "Delete failed",
@@ -1349,12 +1441,18 @@ class PagesManager(QDialog):
         pages = self.get_selected_pages()
         if not pages:
             return
+        # One undo entry per rotated page so multi-select rotate is
+        # undoable step-by-step (Ctrl+Z once per page).
         for p in pages:
             ok, _msg = PDFManipulator.rotate_page(self.engine.path, p, angle)
             if not ok:
                 QMessageBox.warning(self, "Rotate failed",
                                     f"Failed to rotate page {p}.")
                 return
+            try:
+                self._undo_pusher("rotate", page_1based=p, angle=angle)
+            except Exception:
+                pass
         self._populate()
 
     def _action_reorder_selected(self):

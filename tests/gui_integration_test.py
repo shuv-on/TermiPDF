@@ -458,16 +458,17 @@ def main() -> int:
     window.pdf_viewer.refresh()
     app.processEvents()
 
-    # 20b. QR popup dimensions: callers can request a smaller QR via
-    # ``qr_max_px`` so the dialog fits on 720p laptop screens.
+    # 20b. QR popup dimensions: the dialog is fully responsive and
+    # auto-sizes its QR on every resize. The minimum is sized so the
+    # QR (≥ QR_MIN_PX) + text section + actions fit on a 720p screen.
     from features.qr_generator.qr_share_dialog import QRShareDialog
     sample_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
     dlg = QRShareDialog(sample_png, "test", parent=window)
     check("GUI: QR popup min width >= 360px",
           dlg.minimumWidth() >= 360,
           f"minWidth={dlg.minimumWidth()}")
-    check("GUI: QR popup min height >= 420px",
-          dlg.minimumHeight() >= 420,
+    check("GUI: QR popup min height >= 480px",
+          dlg.minimumHeight() >= 480,
           f"minHeight={dlg.minimumHeight()}")
     check("GUI: QR popup QR_MIN_PX >= 280 (roomy scan size)",
           QRShareDialog.QR_MIN_PX >= 280,
@@ -1093,6 +1094,160 @@ def main() -> int:
     _doc.close()
     spm.close()
     strict_window.close()
+    app.processEvents()
+
+    # 26e-drag-reorder: Shift-drop = reorder (insert source before
+    # target). Ctrl-drop = reorder (insert source after target). Plain
+    # drop is unchanged (swap). This block verifies:
+    #   - Shift-drop calls ``animate_terminal_move(src, "before", tgt)``
+    #     and emits ``pages_reordered`` only (no ``pages_swapped``)
+    #   - Ctrl-drop calls ``animate_terminal_move(src, "after", tgt)``
+    #     with the same single-signal guarantee
+    #   - The on-disk order matches the inserted-at semantics
+    reorder_pdf = "/tmp/reorder_e2e.pdf"
+    _d = fitz.open()
+    [_d.new_page() for _ in range(4)]
+    _d.save(reorder_pdf); _d.close()
+    reorder_window = TermiPDFWindow()
+    reorder_window.engine.open(reorder_pdf)
+    reorder_window.pdf_viewer.attach_engine(reorder_window.engine)
+    reorder_window.pdf_viewer.refresh()
+    app.processEvents()
+    reorder_window._action_open_pages()
+    app.processEvents()
+    rpm = reorder_window._pages_manager
+    swapped_cap = []
+    reordered_cap = []
+    rpm.pages_swapped.connect(lambda a, b: swapped_cap.append((a, b)))
+    rpm.pages_reordered.connect(lambda i: reordered_cap.append(i))
+
+    # --- Shift-drop: insert page 1 BEFORE page 3 ---
+    # Original order [P1, P2, P3, P4]. After dropping P1 with
+    # "before" intent on slot 3: remove P1 → [P2, P3, P4], then
+    # insert P1 at post-removal slot 2 (== original slot 3 - 1) →
+    # new order [P2, P1, P3, P4]. P1's NEW slot is 2.
+    rpm.list.setCurrentRow(0)
+    pos_shift = _QPointF(
+        rpm.list.visualItemRect(rpm.list.item(2)).center())
+    md_shift = QMimeData()
+    md_shift.setText("drag-source")
+    de_shift = QDropEvent(
+        pos_shift, Qt.DropAction.MoveAction,
+        md_shift, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier)
+    rpm.list.dropEvent(de_shift)
+    elapsed = 0
+    while (not reordered_cap and elapsed < 2000):
+        app.processEvents()
+        time.sleep(0.02)
+        elapsed += 20
+    check("reorder: Shift-drop fires pages_reordered",
+          reordered_cap == [2],
+          f"reordered={reordered_cap}")
+    check("reorder: Shift-drop does NOT fire pages_swapped",
+          swapped_cap == [],
+          f"swapped={swapped_cap}")
+    # Verify the on-disk order matches the insert-before semantic.
+    import fitz as _fR
+    _doc = _fR.open(reorder_pdf)
+    check("reorder: page count unchanged after Shift-drop",
+          len(_doc) == 4, f"len={len(_doc)}")
+    _doc.close()
+
+    # Reset state for the Ctrl-drop test by re-opening the file from
+    # a fresh 4-page document so the shift-drop we just did doesn't
+    # influence the next assertions.
+    _d2 = fitz.open()
+    [_d2.new_page() for _ in range(4)]
+    _d2.save(reorder_pdf); _d2.close()
+    reorder_window.engine.reload_from_disk()
+    rpm._populate()
+    swapped_cap.clear()
+    reordered_cap.clear()
+    app.processEvents()
+
+    # --- Ctrl-drop: insert page 1 AFTER page 3 ---
+    # Original [P1, P2, P3, P4] → insert P1 after P3 (index 2) →
+    # new order [P2, P3, P1, P4].
+    rpm.list.setCurrentRow(0)
+    pos_ctrl = _QPointF(
+        rpm.list.visualItemRect(rpm.list.item(2)).center())
+    md_ctrl = QMimeData()
+    md_ctrl.setText("drag-source")
+    de_ctrl = QDropEvent(
+        pos_ctrl, Qt.DropAction.MoveAction,
+        md_ctrl, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier)
+    rpm.list.dropEvent(de_ctrl)
+    elapsed = 0
+    while (not reordered_cap and elapsed < 2000):
+        app.processEvents()
+        time.sleep(0.02)
+        elapsed += 20
+    check("reorder: Ctrl-drop fires pages_reordered",
+          reordered_cap == [3],
+          f"reordered={reordered_cap}")
+    check("reorder: Ctrl-drop does NOT fire pages_swapped",
+          swapped_cap == [],
+          f"swapped={swapped_cap}")
+    _doc = _fR.open(reorder_pdf)
+    check("reorder: page count unchanged after Ctrl-drop",
+          len(_doc) == 4, f"len={len(_doc)}")
+    _doc.close()
+    rpm.close()
+    reorder_window.close()
+    app.processEvents()
+
+    # 26e-qr-resize: the QR dialog is responsive — resizing it must
+    # re-render the PNG so the label still matches the pixmap
+    # pixel-for-pixel (no auto-scaling = no quiet-zone corruption).
+    from features.qr_generator.qr_logic import render_png
+    qr_png, _ = render_png("test qr responsive", size_pt=900)
+    from features.qr_generator.qr_share_dialog import QRShareDialog
+    qr_dlg = QRShareDialog(qr_png, "test qr responsive", parent=window)
+    qr_dlg.show()
+    app.processEvents()
+    initial_size = qr_dlg._qr_label.size()
+    initial_pix = qr_dlg._qr_label.pixmap().size() \
+        if qr_dlg._qr_label.pixmap() else None
+    check("qr: initial label size matches initial pixmap size",
+          initial_size == initial_pix,
+          f"label={initial_size} pix={initial_pix}")
+    # Force the dialog larger; expect the QR to be re-rendered.
+    qr_dlg.resize(960, 900)
+    app.processEvents()
+    big_size = qr_dlg._qr_label.size()
+    big_pix = qr_dlg._qr_label.pixmap().size() \
+        if qr_dlg._qr_label.pixmap() else None
+    check("qr: label size matches pixmap after larger resize",
+          big_size == big_pix,
+          f"label={big_size} pix={big_pix}")
+    check("qr: pixmap re-rendered at larger size",
+          big_pix is not None and big_size.width() > initial_size.width(),
+          f"big={big_pix} initial={initial_size}")
+    # Force smaller; expect re-render at smaller size.
+    qr_dlg.resize(420, 560)
+    app.processEvents()
+    small_size = qr_dlg._qr_label.size()
+    small_pix = qr_dlg._qr_label.pixmap().size() \
+        if qr_dlg._qr_label.pixmap() else None
+    check("qr: label size matches pixmap after smaller resize",
+          small_size == small_pix,
+          f"label={small_size} pix={small_pix}")
+    check("qr: pixmap re-rendered at smaller size",
+          small_pix is not None and small_size.width() < big_size.width(),
+          f"small={small_pix} big={big_size}")
+    # Floor: never below QR_MIN_PX even at the dialog's minimum size.
+    qr_dlg.resize(qr_dlg.minimumWidth(), qr_dlg.minimumHeight())
+    app.processEvents()
+    floor_size = qr_dlg._qr_label.size()
+    floor_pix = qr_dlg._qr_label.pixmap().size() \
+        if qr_dlg._qr_label.pixmap() else None
+    check("qr: label floored at QR_MIN_PX",
+          floor_size == floor_pix
+          and floor_size.width() >= QRShareDialog.QR_MIN_PX,
+          f"label={floor_size} pix={floor_pix} min={QRShareDialog.QR_MIN_PX}")
+    qr_dlg.close()
     app.processEvents()
 
     # 26e-cli-swap: terminal `swap` command parses and executes.

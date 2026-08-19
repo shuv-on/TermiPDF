@@ -345,6 +345,154 @@ def main() -> int:
     check("annotation re-added by redo", after_redo == post_count,
           f"{after_redo} annot(s)")
 
+    # --------------------------------------------------------------- T12b
+    section("T12b — Page-level undo/redo (swap / move / rotate / delete)")
+
+    def _page_labels(path):
+        """Return the list of "LABEL_<n>" strings at each slot — used to
+        fingerprint the on-disk page order."""
+        d = fitz.open(path)
+        out = [d[i].get_text().strip() for i in range(len(d))]
+        d.close()
+        return out
+
+    # Build a 5-page PDF with unique labels.
+    page_pdf = str(tmp / "page_undo_fixture.pdf")
+    doc = fitz.open()
+    for i in range(5):
+        pg = doc.new_page(width=400, height=600)
+        pg.insert_text((100, 200), f"LABEL_{i + 1}", fontsize=20)
+    doc.save(page_pdf)
+    doc.close()
+
+    # ----- swap -----
+    swap_pdf = str(tmp / "page_undo_swap.pdf")
+    shutil.copy(page_pdf, swap_pdf)
+    eng_swap = ViewerEngine()
+    eng_swap.open(swap_pdf)
+    stack_swap = UndoStack(eng_swap)
+
+    PDFManipulator.swap_pages(swap_pdf, 1, 3)
+    stack_swap.push_page_op("swap", page_a=1, page_b=3)
+    labels_after = _page_labels(swap_pdf)
+    check("swap wrote new order", labels_after[0] == "LABEL_3"
+          and labels_after[2] == "LABEL_1",
+          str(labels_after))
+
+    ok, msg = stack_swap.undo()
+    check("swap undo ok", ok, msg)
+    eng_swap.reload_from_disk()
+    check("swap undo restored identity",
+          _page_labels(swap_pdf)[0] == "LABEL_1", str(_page_labels(swap_pdf)))
+
+    ok, msg = stack_swap.redo()
+    check("swap redo ok", ok, msg)
+    eng_swap.reload_from_disk()
+    check("swap redo re-applied swap",
+          _page_labels(swap_pdf)[0] == "LABEL_3", str(_page_labels(swap_pdf)))
+
+    # ----- rotate -----
+    rot_pdf = str(tmp / "page_undo_rotate.pdf")
+    shutil.copy(page_pdf, rot_pdf)
+    eng_rot = ViewerEngine()
+    eng_rot.open(rot_pdf)
+    stack_rot = UndoStack(eng_rot)
+    orig_rot = eng_rot.get_page(1).rotation
+
+    PDFManipulator.rotate_page(rot_pdf, 2, 90)
+    eng_rot.reload_from_disk()
+    stack_rot.push_page_op("rotate", page=2, angle=90)
+    check("rotate wrote new rotation",
+          eng_rot.get_page(1).rotation == (orig_rot + 90) % 360,
+          f"{eng_rot.get_page(1).rotation}°")
+
+    ok, msg = stack_rot.undo()
+    check("rotate undo ok", ok, msg)
+    eng_rot.reload_from_disk()
+    check("rotate undo restored angle",
+          eng_rot.get_page(1).rotation == orig_rot,
+          f"{eng_rot.get_page(1).rotation}°")
+
+    # ----- move -----
+    move_pdf = str(tmp / "page_undo_move.pdf")
+    shutil.copy(page_pdf, move_pdf)
+    eng_move = ViewerEngine()
+    eng_move.open(move_pdf)
+    stack_move = UndoStack(eng_move)
+
+    PDFManipulator.move_page(move_pdf, 1, 3)
+    stack_move.push_page_op("move", src_page=1, target_slot=3)
+    check("move wrote new order",
+          _page_labels(move_pdf) == ["LABEL_2", "LABEL_3",
+                                       "LABEL_1", "LABEL_4", "LABEL_5"],
+          str(_page_labels(move_pdf)))
+
+    ok, msg = stack_move.undo()
+    check("move undo ok", ok, msg)
+    eng_move.reload_from_disk()
+    check("move undo restored identity",
+          _page_labels(move_pdf) == [f"LABEL_{i + 1}" for i in range(5)],
+          str(_page_labels(move_pdf)))
+
+    ok, msg = stack_move.redo()
+    check("move redo ok", ok, msg)
+    eng_move.reload_from_disk()
+    check("move redo re-applied move",
+          _page_labels(move_pdf) == ["LABEL_2", "LABEL_3",
+                                       "LABEL_1", "LABEL_4", "LABEL_5"],
+          str(_page_labels(move_pdf)))
+
+    # ----- delete -----
+    del_pdf = str(tmp / "page_undo_delete.pdf")
+    shutil.copy(page_pdf, del_pdf)
+    eng_del = ViewerEngine()
+    eng_del.open(del_pdf)
+    stack_del = UndoStack(eng_del)
+
+    ok_c, _, cache = UndoStack.cache_deleted_page(del_pdf, 4)
+    check("cache deleted page for undo", ok_c and os.path.isfile(cache),
+          cache or "")
+    PDFManipulator.delete_page(del_pdf, 4)
+    stack_del.push_page_op("delete", page=4, deleted_page_pdf=cache)
+    check("delete shrunk page count",
+          len(fitz.open(del_pdf)) == 4, f"{len(fitz.open(del_pdf))} pages")
+
+    ok, msg = stack_del.undo()
+    check("delete undo ok", ok, msg)
+    eng_del.reload_from_disk()
+    check("delete undo restored page count",
+          len(fitz.open(del_pdf)) == 5, f"{len(fitz.open(del_pdf))} pages")
+    # The restored page's label should be LABEL_4.
+    d = fitz.open(del_pdf)
+    restored_label = d[3].get_text().strip()  # page 4 (1-based) = index 3
+    d.close()
+    check("delete undo restored correct page content",
+          restored_label == "LABEL_4", restored_label)
+
+    # ----- multi-step: swap, rotate, delete, then 3x undo -----
+    multi_pdf = str(tmp / "page_undo_multi.pdf")
+    shutil.copy(page_pdf, multi_pdf)
+    eng_multi = ViewerEngine()
+    eng_multi.open(multi_pdf)
+    stack_multi = UndoStack(eng_multi)
+
+    PDFManipulator.swap_pages(multi_pdf, 1, 2)
+    stack_multi.push_page_op("swap", page_a=1, page_b=2)
+    PDFManipulator.rotate_page(multi_pdf, 1, 90)
+    stack_multi.push_page_op("rotate", page=1, angle=90)
+    ok_c, _, cache = UndoStack.cache_deleted_page(multi_pdf, 3)
+    PDFManipulator.delete_page(multi_pdf, 3)
+    stack_multi.push_page_op("delete", page=3, deleted_page_pdf=cache)
+
+    # Three undos: delete → rotate → swap. After all three the file
+    # should be back to the identity 5-page fixture.
+    stack_multi.undo(); eng_multi.reload_from_disk()
+    stack_multi.undo(); eng_multi.reload_from_disk()
+    stack_multi.undo(); eng_multi.reload_from_disk()
+    check("multi-step undo restores identity",
+          _page_labels(multi_pdf) == [f"LABEL_{i + 1}" for i in range(5)],
+          str(_page_labels(multi_pdf)))
+
     # --------------------------------------------------------------- T13
     section("T13 — Phase 4: RecentFiles persistence")
     from features.pdf_viewer.recent_files import RecentFiles

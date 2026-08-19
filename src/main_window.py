@@ -65,16 +65,6 @@ from shared.utils.theme_manager import ThemeManager
 from shared.utils.color_utils import parse_color
 from shared.utils.path_solver import resolve_user_path, is_pdf_file
 
-# QR popup sizing budget — the dialog has title bar + text section +
-# action row + chrome totalling roughly _QR_DIALOG_CHROME_PX vertically
-# and _QR_DIALOG_HORIZONTAL_MARGIN_PX horizontally. Subtracting those
-# from the available screen rect yields the largest QR pixel size that
-# still fits on small (720p) screens without overflowing.
-_QR_PNG_MAX_PX = 900
-_QR_PNG_MIN_PX = 280
-_QR_DIALOG_CHROME_PX = 380
-_QR_DIALOG_HORIZONTAL_MARGIN_PX = 80
-
 
 def _parse_p_range(token: str):
     """Parse a ``p-N`` or ``p-N-M`` token (as used by ``merge p-1 p-10``).
@@ -1404,14 +1394,62 @@ class TermiPDFWindow(QMainWindow):
     def _cmd_undo(self, _args):
         ok, msg = self.undo_stack.undo()
         if ok:
-            self.pdf_viewer.refresh()
+            self._refresh_after_undo_redo()
         return self._as_result(ok, msg)
 
     def _cmd_redo(self, _args):
         ok, msg = self.undo_stack.redo()
         if ok:
-            self.pdf_viewer.refresh()
+            self._refresh_after_undo_redo()
         return self._as_result(ok, msg)
+
+    # -------------------------------------------- page-op orchestration
+    def _refresh_after_page_op(self) -> None:
+        """Reload the viewer after an on-disk page mutation, without
+        touching the undo stack. Used after terminal/PM-initiated
+        swap / reorder / move / rotate / delete."""
+        if not self.engine or not self.engine.path:
+            return
+        try:
+            self.engine.reload_from_disk()
+        except Exception:
+            pass
+        try:
+            self.pdf_viewer.refresh()
+        except Exception:
+            pass
+        # Pages Manager — if it's open, repopulate so thumbnails + labels
+        # match the new state. ``_populate`` is private but stable.
+        pm = getattr(self, "_pages_manager", None)
+        if pm is not None and pm.isVisible():
+            try:
+                pm._populate()
+            except Exception:
+                pass
+        try:
+            self._update_window_title()
+        except Exception:
+            pass
+
+    def _refresh_after_undo_redo(self) -> None:
+        """Refresh viewer + Pages Manager after the undo stack applied
+        an inverse or forward. The stack already called
+        ``engine.reload_from_disk()`` so we just need to repaint and
+        update the PM grid + window title."""
+        try:
+            self.pdf_viewer.refresh()
+        except Exception:
+            pass
+        pm = getattr(self, "_pages_manager", None)
+        if pm is not None and pm.isVisible():
+            try:
+                pm._populate()
+            except Exception:
+                pass
+        try:
+            self._update_window_title()
+        except Exception:
+            pass
 
     # ----- editor --------------------------------------------------------
     def _cmd_addtext(self, args):
@@ -1620,9 +1658,30 @@ class TermiPDFWindow(QMainWindow):
             p = int(args[0])
         except ValueError:
             return CommandResult.error("page must be a number.")
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return CommandResult.error("No PDF open.")
+        n = self.engine.page_count
+        if p < 1 or p > n:
+            return CommandResult.error(f"Invalid page {p} (1..{n}).")
+        if n <= 1:
+            return CommandResult.error("Cannot delete the only remaining page.")
+        # Cache the deleted page's content so undo can restore it.
+        ok_cache, msg_cache, cache_pdf = UndoStack.cache_deleted_page(
+            self.engine.path, p)
+        if not ok_cache:
+            return CommandResult.error(f"Cannot cache page for undo: {msg_cache}")
         ok, msg = PDFManipulator.delete_page(self.engine.path, p)
         if ok:
-            self._do_open(self.engine.path)
+            # Push an undo entry — undo will re-merge ``cache_pdf`` at slot p.
+            self.undo_stack.push_page_op("delete", page=p,
+                                          deleted_page_pdf=cache_pdf)
+            self._refresh_after_page_op()
+        else:
+            # Clean up the cache so we don't leak it.
+            try:
+                os.remove(cache_pdf)
+            except Exception:
+                pass
         return self._as_result(ok, msg)
 
     def _cmd_rotate(self, args):
@@ -1633,9 +1692,18 @@ class TermiPDFWindow(QMainWindow):
             a = int(args[1])
         except ValueError:
             return CommandResult.error("page and angle must be integers.")
+        if not self.engine or not self.engine.is_open or not self.engine.path:
+            return CommandResult.error("No PDF open.")
+        n = self.engine.page_count
+        if p < 1 or p > n:
+            return CommandResult.error(f"Invalid page {p} (1..{n}).")
+        # Snapshot the page order so undo restores it (rotation doesn't
+        # change order, but storing it keeps the entry uniform and
+        # protects against batched ops that might come later).
         ok, msg = PDFManipulator.rotate_page(self.engine.path, p, a)
         if ok:
-            self._do_open(self.engine.path)
+            self.undo_stack.push_page_op("rotate", page=p, angle=a)
+            self._refresh_after_page_op()
         return self._as_result(ok, msg)
 
     def _cmd_swap(self, args):
@@ -1696,6 +1764,7 @@ class TermiPDFWindow(QMainWindow):
         # the end.)
         results: List[str] = []
         ok_all = True
+        any_swap_applied = False
         for a, b in sorted(pairs, key=lambda p: -max(p[0], p[1])):
             if a < 1 or a > n or b < 1 or b > n:
                 ok_all = False
@@ -1709,12 +1778,26 @@ class TermiPDFWindow(QMainWindow):
                 ok_all = False
                 results.append(f"  ({a},{b}): {msg}")
             else:
+                any_swap_applied = True
+                # Push one undo entry per applied swap. Each entry
+                # carries (page_a, page_b); undo re-swaps the same
+                # pair (swap is its own inverse). Doing one entry per
+                # pair means a multi-pair `swap 1,3 2,5` undo reverses
+                # the pairs in reverse order, matching the user's
+                # mental model.
+                self.undo_stack.push_page_op("swap", page_a=a, page_b=b)
                 results.append(f"  ({a},{b}): {msg}")
 
-        # Reload the engine so the viewer reflects the new order.
-        if ok_all:
+        # If at least one swap landed, the entries above are already on
+        # the undo stack. Refresh the viewer / Pages Manager without
+        # wiping the stack — do NOT call _do_open here.
+        if ok_all and any_swap_applied:
             try:
-                self._do_open(self.engine.path)
+                self.engine.reload_from_disk()
+            except Exception:
+                pass
+            try:
+                self.pdf_viewer.refresh()
             except Exception:
                 pass
             # If the Pages Manager is open, let it observe the swap so
@@ -1732,6 +1815,21 @@ class TermiPDFWindow(QMainWindow):
                         pm.animate_terminal_swap(a, b, apply_on_disk=False)
                     except Exception:
                         pass
+            try:
+                self._update_window_title()
+            except Exception:
+                pass
+        elif ok_all:
+            # All swaps were no-ops — still refresh so the viewer
+            # reflects the (unchanged) state.
+            try:
+                self.engine.reload_from_disk()
+            except Exception:
+                pass
+            try:
+                self.pdf_viewer.refresh()
+            except Exception:
+                pass
 
         msg = "Swap complete." if ok_all else "Swap finished with errors."
         msg += "\n" + "\n".join(results)
@@ -2091,9 +2189,60 @@ class TermiPDFWindow(QMainWindow):
                 self._render_result(result)
                 return result
 
+            # ``undo_pusher`` lets the PM's toolbar / right-click /
+            # drag-reorder actions push entries onto the main window's
+            # UndoStack — so Ctrl+Z / Ctrl+Y reverse them too. Each
+            # branch just translates the PM-side kwarg names into the
+            # UndoStack.push_page_op kwargs and updates the window
+            # title so the `*` dirty marker appears.
+            def _undo_pusher(kind: str, **kwargs):
+                if not self.engine or not self.engine.is_open \
+                        or not self.engine.path:
+                    return
+                if kind == "swap":
+                    src = kwargs.get("src_page_1based")
+                    tgt = kwargs.get("target_page_1based")
+                    if not src or not tgt or src == tgt:
+                        return
+                    self.undo_stack.push_page_op(
+                        "swap", page_a=int(src), page_b=int(tgt))
+                elif kind == "move":
+                    src = kwargs.get("src_page_1based")
+                    tgt = kwargs.get("target_slot")
+                    if not src or not tgt:
+                        return
+                    self.undo_stack.push_page_op(
+                        "move", src_page=int(src), target_slot=int(tgt))
+                elif kind == "rotate":
+                    page = kwargs.get("page_1based")
+                    angle = kwargs.get("angle")
+                    if page is None or angle is None:
+                        return
+                    self.undo_stack.push_page_op(
+                        "rotate", page=int(page), angle=int(angle))
+                elif kind == "delete":
+                    page = kwargs.get("page_1based")
+                    if page is None:
+                        return
+                    # Cache the page's content BEFORE the caller
+                    # deletes it (PM calls the pusher first, then
+                    # delete_page — see PagesManager._action_delete_selected).
+                    ok_c, _msg_c, cache_pdf = UndoStack.cache_deleted_page(
+                        self.engine.path, int(page))
+                    if not ok_c:
+                        return
+                    self.undo_stack.push_page_op(
+                        "delete", page=int(page),
+                        deleted_page_pdf=cache_pdf)
+                try:
+                    self._update_window_title()
+                except Exception:
+                    pass
+
             self._pages_manager = PagesManager(
                 self.engine, parent=self,
                 command_runner=_cmd_runner,
+                undo_pusher=_undo_pusher,
             )
             self._pages_manager.navigate_to_page.connect(self._on_pages_manager_navigate)
             self._pages_manager.pages_deleted.connect(self._on_pages_manager_deleted)
@@ -2115,10 +2264,21 @@ class TermiPDFWindow(QMainWindow):
             self._render_result(self._as_result(ok, msg))
 
     def _on_pages_manager_deleted(self, pages: list):
-        """Pages were deleted via the Pages Manager — re-open the PDF so
-        the viewer reflects the new page count."""
+        """Pages were deleted via the Pages Manager — reload the PDF
+        so the viewer reflects the new page count.
+
+        We use ``reload_from_disk`` instead of ``_do_open`` so the
+        undo stack survives (PM-initiated deletes are already on the
+        stack)."""
         if self.engine.path:
-            self._do_open(self.engine.path)
+            try:
+                self.engine.reload_from_disk()
+            except Exception:
+                pass
+            try:
+                self.pdf_viewer.refresh()
+            except Exception:
+                pass
         self._render_result(self._as_result(True,
             f"Deleted {len(pages)} page(s): {pages}."))
 
@@ -2128,11 +2288,15 @@ class TermiPDFWindow(QMainWindow):
             f"New PDF created: {out_path}"))
 
     def _on_pages_manager_reordered(self, new_index_1based: int):
-        """A page was reordered via drag-and-drop — re-open the PDF so
+        """A page was reordered via drag-and-drop — reload the PDF so
         the viewer reflects the new page order, then navigate to the
-        moved page."""
+        moved page. Uses ``reload_from_disk`` to preserve the undo
+        stack that the PM-initiated move just pushed."""
         if self.engine.path:
-            self._do_open(self.engine.path)
+            try:
+                self.engine.reload_from_disk()
+            except Exception:
+                pass
             ok, msg = self.engine.goto(new_index_1based - 1)
             if ok:
                 self.pdf_viewer.refresh()
@@ -2140,11 +2304,14 @@ class TermiPDFWindow(QMainWindow):
             f"Reordered pages; moved page now at slot {new_index_1based}."))
 
     def _on_pages_manager_swapped(self, src_1based: int, target_1based: int):
-        """A true page-swap landed via drag-and-drop. Re-open the PDF and
+        """A true page-swap landed via drag-and-drop. Reload the PDF and
         keep the viewer's focus on the source page's *new* slot
         (which equals target_1based — the source was dropped there)."""
         if self.engine.path:
-            self._do_open(self.engine.path)
+            try:
+                self.engine.reload_from_disk()
+            except Exception:
+                pass
             ok, _msg = self.engine.goto(target_1based - 1)
             if ok:
                 self.pdf_viewer.refresh()
@@ -2464,21 +2631,28 @@ class TermiPDFWindow(QMainWindow):
 
         The rotation is written to the PDF in place (atomic temp-file
         replace so a crash can't corrupt the document) and the viewer
-        is re-opened to refresh the page count + page indicator.
-        The user stays on the same page after the rotation.
+        is reloaded to reflect the new rotation. The user stays on the
+        same page after the rotation.
         """
         if not self.engine.is_open:
             self._render_result(CommandResult.error("No PDF is open."))
             return
         page_num = self.engine.current_page + 1   # 1-based
         # Remember the page we were on so we can restore it after the
-        # rotate forces a re-open (re-open resets current_page to 0).
+        # reload (reload clamps current_page to the new page count).
         saved_page = self.engine.current_page
         saved_scroll = self.pdf_viewer.scroll_area.verticalScrollBar().value()
         ok, msg = PDFManipulator.rotate_page(self.engine.path, page_num, 90)
         if ok:
-            # Re-open so the view reflects the new rotation immediately.
-            self._do_open(self.engine.path)
+            # Push the undo entry BEFORE reloading so the entry's
+            # forward payload matches what the user just saw.
+            self.undo_stack.push_page_op("rotate", page=page_num, angle=90)
+            # Reload in place (NOT _do_open — it would wipe the undo
+            # stack we just pushed).
+            try:
+                self.engine.reload_from_disk()
+            except Exception:
+                pass
             # Restore the page we were viewing (clamped to the new count,
             # which is unchanged for a single-page rotation).
             target = max(0, min(saved_page, max(self.engine.page_count - 1, 0)))
@@ -2489,6 +2663,17 @@ class TermiPDFWindow(QMainWindow):
                 # same content spot as before the rotation.
                 sb = self.pdf_viewer.scroll_area.verticalScrollBar()
                 sb.setValue(min(saved_scroll, sb.maximum()))
+            # Refresh the Pages Manager grid if it's open.
+            pm = getattr(self, "_pages_manager", None)
+            if pm is not None and pm.isVisible():
+                try:
+                    pm._populate()
+                except Exception:
+                    pass
+            try:
+                self._update_window_title()
+            except Exception:
+                pass
             self._render_result(CommandResult.print(
                 f"Rotated page {page_num} by 90°. Saved in place."))
         else:
@@ -2697,14 +2882,9 @@ class TermiPDFWindow(QMainWindow):
 
         try:
             from features.qr_generator.qr_share_dialog import QRShareDialog
-            # Decide the QR's pixel size based on the screen we'll
-            # place the popup on. On 720p laptop screens the full
-            # 900px QR makes the dialog overflow vertically, so we
-            # shrink the QR so the dialog stays inside the available
-            # rect (typically ≈480-540 px). The quiet zone is preserved
-            # because we scale the PNG proportionally before pinning
-            # the label.
-            qr_max_px = self._qr_max_px_for_screen()
+            # The QR dialog now sizes itself responsively on every
+            # resizeEvent — we only need to seed it on the screen and
+            # let the user resize it via the platform's grip.
             dlg = QRShareDialog(
                 png_bytes, meta.get("encoded_length", len(text)) and
                 (text[:meta.get("encoded_length", len(text))]
@@ -2713,16 +2893,8 @@ class TermiPDFWindow(QMainWindow):
                 truncated=meta.get("truncated", False),
                 original_length=meta.get("original_length", len(text)),
                 encoded_length=meta.get("encoded_length", len(text)),
-                qr_max_px=qr_max_px,
             )
-            # Centre the popup on the main window. Without an explicit
-            # position Qt sometimes places the dialog off-screen on
-            # multi-monitor setups (the popup is 820×880 — too big to
-            # fit on a 720p laptop screen if Qt picks the wrong
-            # monitor). We nudge the position so the dialog stays
-            # fully inside the parent window's available rect.
             self._position_child_on_screen(dlg)
-            # Non-modal so the user can keep working with the PDF.
             dlg.show()
         except Exception as exc:
             self._render_result(CommandResult.error(f"QR dialog failed: {exc}"))
@@ -2767,8 +2939,7 @@ class TermiPDFWindow(QMainWindow):
 
         Falls back to the primary screen (multi-monitor edge case where
         the parent's centre is outside any known screen) and to ``None``
-        if no screens are registered. Single source of truth shared by
-        ``_position_child_on_screen`` and ``_qr_max_px_for_screen``.
+        if no screens are registered.
         """
         try:
             from PyQt6.QtGui import QGuiApplication
@@ -2778,19 +2949,6 @@ class TermiPDFWindow(QMainWindow):
             return screen.availableGeometry() if screen is not None else None
         except Exception:
             return None
-
-    def _qr_max_px_for_screen(self) -> int:
-        """Pick a QR pixel size that lets the QR popup fit the active screen."""
-        avail = self._available_screen_rect()
-        if avail is None:
-            return _QR_PNG_MAX_PX
-        budget_h = max(_QR_PNG_MIN_PX,
-                       min(_QR_PNG_MAX_PX,
-                           avail.height() - _QR_DIALOG_CHROME_PX))
-        budget_w = max(_QR_PNG_MIN_PX,
-                       min(_QR_PNG_MAX_PX,
-                           avail.width() - _QR_DIALOG_HORIZONTAL_MARGIN_PX))
-        return min(budget_h, budget_w)
 
     def _copy_page_text(self):
         if not self.engine.is_open:

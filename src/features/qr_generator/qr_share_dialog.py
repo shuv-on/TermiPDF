@@ -3,22 +3,21 @@ qr_share_dialog.py — Floating QR-share popup.
 
 When the user right-clicks on selected text and chooses "Share as QR…",
 a compact, draggable, theme-aware popup opens showing the QR code, the
-encoded text, and quick-action buttons. The QR is *not* stamped onto
-the PDF — this matches MS Edge's "Share as QR" UX where the code is a
+encoded text, and quick-action buttons. The QR is *not* stamped onto the
+PDF — this matches MS Edge's "Share as QR" UX where the code is a
 transient overlay rather than a permanent page edit.
 
-Design notes
-------------
-The popup uses the platform's standard window frame (close / minimize /
-maximize / system menu) per user request. The hero-sized QR has plenty
-of breathing room and the accent color is sourced from the active theme
-so the dialog looks at home in both dark and light palettes.
+Responsiveness
+--------------
+The dialog is fully resizeable via the platform's native resize grip.
+On every ``resizeEvent`` we re-render the QR PNG at the label's current
+size so the QR always fills its section crisply and the quiet zone
+stays proportional — Qt never auto-scales the pixmap, which would clip
+the white border that phone cameras need to detect orientation.
 """
 from __future__ import annotations
 
-from typing import Optional
-
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap, QImage, QGuiApplication, QColor, QPainter, QFont
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
@@ -50,65 +49,59 @@ def _is_dark() -> bool:
 
 
 class QRShareDialog(QDialog):
-    """Compact, draggable, non-modal QR popup."""
+    """Compact, draggable, non-modal QR popup.
 
-    # The QR image is rendered at this size at minimum (the actual PNG
-    # is 900 px from render_png(), so the label is never upscaled — it
-    # just guarantees the on-screen cell is always roomy).
-    QR_MIN_PX = 380
+    The QR scales to fill the hero section on every ``resizeEvent``;
+    resizing the dialog via the platform's resize grip is the only
+    zoom mechanism (per user request — no zoom buttons).
+    """
+
+    # Floor — never render the QR smaller than this. Phone scanners
+    # start struggling below ~250 px; we stay safely above that.
+    QR_MIN_PX = 280
+    # Ceiling — we never up-sample beyond the source PNG's resolution.
+    QR_MAX_PX = 900
 
     # ------------------------------------------------------------------
     def __init__(self, png_bytes: bytes, text: str, parent=None,
                  truncated: bool = False, original_length: int = 0,
-                 encoded_length: int = 0,
-                 qr_max_px: Optional[int] = None):
-        # Use the default dialog window type so the platform's native
-        # title bar with close / minimize / maximize / system-menu
-        # buttons is shown. The user explicitly asked for a standard
-        # window frame (no FramelessWindowHint, no Tool flag).
+                 encoded_length: int = 0):
         super().__init__(parent)
         self._png_bytes = png_bytes
         self._text = text
         self._truncated = truncated
         self._original_length = original_length or len(text)
         self._encoded_length = encoded_length or len(text)
-        # Caller can ask the dialog to scale its QR to fit a target
-        # display size — main_window passes the smaller of the screen's
-        # available height / width so the popup fits on 720p laptop
-        # screens without cropping the QR off-screen. Falls back to
-        # the full native QR size when ``qr_max_px`` is None.
-        self._qr_max_px = qr_max_px
+        # Lazy caches for the responsive resize path. ``_qr_source_img``
+        # avoids re-decoding PNG bytes on every tick; ``_qr_last_pix``
+        # avoids re-scaling the QImage when the holder's target size
+        # hasn't actually changed (e.g. mid-drag oscillation).
+        self._qr_source_img: QImage | None = None
+        self._qr_last_pix: QPixmap | None = None
         self.setWindowTitle("Share as QR")
         self.setModal(False)
-        # Explicitly request standard buttons so they're visible on
-        # platforms that don't auto-add them (some Linux WMs).
         self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
         self.setWindowFlag(Qt.WindowType.WindowSystemMenuHint, True)
-        # Compact minimum so the popup fits on 720p laptop screens.
-        # The QR label is allowed to scale down (via ``qr_max_px``)
-        # when the screen is tight, which keeps the dialog under
-        # 540px tall — well inside a typical 768px display.
-        self.setMinimumSize(420, 480)
+        # Floor: hero (QR_MIN_PX + chrome) × (text section + actions).
+        # The QR can shrink toward QR_MIN_PX; the text + actions rows
+        # are independent and keep the dialog usable on tiny screens.
+        self.setMinimumSize(
+            self.QR_MIN_PX + 80,
+            self.QR_MIN_PX + 240,
+        )
         self.resize(560, 640)
         self._build_ui()
         self._apply_theme()
-        # No pop-in animation — instant cut, matching the no-animation
-        # policy on the rest of the viewer (per user request).
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
-        # Standard native window frame is provided by the platform —
-        # no custom title bar needed. We use a single root layout that
-        # hosts a QScrollArea so all content remains reachable even on
-        # small displays / tight title bar regions.
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Drop shadow gives the dialog a "floating" feel under the
-        # native frame.
+        # Drop shadow for the floating feel under the native frame.
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(28)
         shadow.setOffset(0, 6)
@@ -123,67 +116,43 @@ class QRShareDialog(QDialog):
         card.setContentsMargins(0, 0, 0, 0)
         card.setSpacing(0)
 
-        # ---- Hero section: big QR with a soft background ----
+        # ---- Hero section: holder + QR (responsive) ----
         hero = QFrame()
         hero.setObjectName("qrShareHero")
         hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(40, 24, 40, 18)
-        hero_layout.setSpacing(0)
+        hero_layout.setContentsMargins(20, 20, 20, 12)
+        hero_layout.setSpacing(6)
 
-        img = QImage.fromData(self._png_bytes)
-        if img.isNull():
-            qr_label = QLabel("(failed to render QR)")
-            qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        else:
-            # The QR image carries a built-in quiet zone; the label is
-            # pinned to the pixmap's native size below so any Qt-side
-            # scaling would clip that border. We therefore pre-scale
-            # the image to the right pixel size BEFORE pinning:
-            #  - upscale to QR_MIN_PX when the PNG is smaller (small
-            #    payloads render at low resolution by default), and
-            #  - downscale to ``qr_max_px`` when the caller asked for
-            #    a tighter fit (e.g. small laptop screen).
-            # The two are collapsed into a single ``scaled()`` call so
-            # we never run the conversion twice. Upscale only applies
-            # when the PNG is below QR_MIN_PX; downscale only when the
-            # PNG exceeds qr_max_px — we never force a re-scale when
-            # the source already satisfies both bounds.
-            cur_w = img.width()
-            cur_h = img.height()
-            target_px = None
-            if cur_w < self.QR_MIN_PX or cur_h < self.QR_MIN_PX:
-                target_px = self.QR_MIN_PX
-            if (self._qr_max_px is not None
-                    and (cur_w > self._qr_max_px
-                         or cur_h > self._qr_max_px)):
-                target_px = (self._qr_max_px
-                             if target_px is None
-                             else min(target_px, self._qr_max_px))
-            if target_px is not None:
-                img = img.scaled(
-                    target_px, target_px,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            pix = QPixmap.fromImage(img)
-            self._qr_pixmap = pix
-            qr_label = QLabel()
-            qr_label.setPixmap(pix)
-            # Pin the label to the pixmap's native size; setScaledContents
-            # off so Qt does NOT scale the pixmap on paint (which would
-            # crop the quiet zone).
-            qr_label.setFixedSize(pix.size())
-            qr_label.setScaledContents(False)
-            qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._qr_label = qr_label
-        qr_label.setObjectName("qrShareImage")
-        hero_layout.addWidget(qr_label, stretch=0, alignment=Qt.AlignmentFlag.AlignCenter)
+        # Holder expands with the dialog — the QR label sits inside
+        # and gets a fresh pixmap on every resizeEvent so the QR
+        # always fills the available space without Qt auto-scaling.
+        self._qr_holder = QFrame()
+        self._qr_holder.setObjectName("qrShareHolder")
+        holder_layout = QVBoxLayout(self._qr_holder)
+        holder_layout.setContentsMargins(0, 0, 0, 0)
+        holder_layout.setSpacing(0)
 
-        # Subtle hint below the QR
+        self._qr_label = QLabel()
+        self._qr_label.setObjectName("qrShareImage")
+        self._qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._qr_label.setMinimumSize(self.QR_MIN_PX, self.QR_MIN_PX)
+        self._qr_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        # ScaledContents off: when Qt paints the label it uses the
+        # pixmap's native size, so the quiet zone is preserved pixel
+        # for pixel. The pixmap itself is regenerated at the label's
+        # current size in resizeEvent().
+        self._qr_label.setScaledContents(False)
+        holder_layout.addWidget(
+            self._qr_label, stretch=1,
+            alignment=Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addWidget(self._qr_holder, stretch=1)
+
         hint = QLabel("Scan with your phone camera")
         hint.setObjectName("qrShareHint")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setContentsMargins(0, 10, 0, 0)
         hero_layout.addWidget(hint)
 
         card.addWidget(hero)
@@ -201,11 +170,6 @@ class QRShareDialog(QDialog):
         meta.setObjectName("qrShareMeta")
         text_layout.addWidget(meta)
 
-        # Truncation banner — shown when the selection was too long
-        # for a single QR (QRv40 caps at ~1273 byte binary at Q error).
-        # Without this the dialog silently encodes less than the user
-        # selected and the recipient's QR scanner reads a truncated
-        # string, which is confusing.
         if self._truncated:
             warn = QLabel(
                 f"⚠ Selection was truncated: encoded "
@@ -220,7 +184,6 @@ class QRShareDialog(QDialog):
         self._text_view.setReadOnly(True)
         self._text_view.setPlainText(self._text)
         self._text_view.setObjectName("qrShareText")
-        # More headroom for long selections — 8-line minimum, 220px max.
         self._text_view.setMinimumHeight(120)
         self._text_view.setMaximumHeight(220)
         monospace = QFont("JetBrains Mono")
@@ -262,6 +225,56 @@ class QRShareDialog(QDialog):
 
         card.addWidget(actions)
 
+    # ------------------------------------------------------------------ resize
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_qr_to_fit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._render_qr_to_fit()
+
+    def _render_qr_to_fit(self):
+        """Re-scale the cached PNG to the holder's current inner size.
+
+        The cache (last QPixmap) keeps resize ticks cheap when the
+        target hasn't actually changed — important because
+        ``resizeEvent`` fires dozens of times per second during a live
+        native-window drag.
+        """
+        # 6-px safety pad on each side so the QR doesn't kiss the
+        # holder edge.
+        target = max(self.QR_MIN_PX,
+                     min(self._qr_holder.width() - 12,
+                         self._qr_holder.height() - 12,
+                         self.QR_MAX_PX))
+        if target <= 0:
+            return
+
+        if self._qr_source_img is None:
+            img = QImage.fromData(self._png_bytes)
+            if img.isNull():
+                self._qr_label.setText("(failed to render QR)")
+                return
+            self._qr_source_img = img
+
+        if (self._qr_last_pix is not None
+                and self._qr_last_pix.width() == target):
+            pix = self._qr_last_pix
+        else:
+            scaled = self._qr_source_img.scaled(
+                target, target,
+                Qt.AspectRatioMode.IgnoreAspectRatio,  # QRs are square
+                Qt.TransformationMode.SmoothTransformation)
+            pix = QPixmap.fromImage(scaled)
+            self._qr_last_pix = pix
+        # Only re-paint / re-size the label when the pixmap actually
+        # changed — otherwise ``setFixedSize`` queues a layout pass on
+        # every resize tick for no visible benefit.
+        if self._qr_label.pixmap() is not pix:
+            self._qr_label.setPixmap(pix)
+            self._qr_label.setFixedSize(pix.size())
+
     # ------------------------------------------------------------------ theme
     def _apply_theme(self):
         dark = _is_dark()
@@ -280,15 +293,13 @@ class QRShareDialog(QDialog):
             }}
         """)
 
-        # Hero section: very subtle inner card for the QR.
-        # NB: the qrShareImage QLabel has NO padding here — the QR
-        # pixmap already contains its own 4-module quiet zone (white
-        # border). Adding padding crops that border and the corner
-        # finder patterns become un-scannable.
         for child in self._card.findChildren(QFrame):
             if child.objectName() == "qrShareHero":
                 child.setStyleSheet(f"""
                     QFrame#qrShareHero {{
+                        background: transparent;
+                    }}
+                    QFrame#qrShareHolder {{
                         background: transparent;
                     }}
                     QLabel#qrShareImage {{

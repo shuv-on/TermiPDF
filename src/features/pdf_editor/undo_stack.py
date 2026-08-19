@@ -1,12 +1,12 @@
 """
-undo_stack.py — Per-document annotation undo/redo.
+undo_stack.py — Per-document annotation + page-level undo/redo.
 
-Each annotation action is represented as a (page_index, action_type, payload)
-triple. The stack stores both the action and the matching inverse so that
-``undo()`` can rewind without us having to record every byte that was written.
+Each action is represented as a (action_type, payload) triple. The stack
+stores both the action and the matching inverse so that ``undo()`` can
+rewind without us having to record every byte that was written.
 
 Storage:
-* action types we care about:
+* annotation actions (``page_index`` 0-based, used to find the right page):
   - ``"add"`` payload is the JSON-like dict returned by ``Page.add_*_annot``
     (``info``, ``rect``, ``vertices``). On undo we delete by walking the page
     annotations and matching these fields.
@@ -14,13 +14,29 @@ Storage:
     re-insert it (kind + rect + vertices + colors).
   - ``"edit_text"`` payload is the new text + rect; the inverse restores the
     original snapshot.
+* page-level actions (``page_index`` unused; ``forward`` / ``inverse`` carry
+  document-level state):
+  - ``"page_op"`` payload has ``"kind"`` in {``"reorder"``, ``"swap"``,
+    ``"move"``, ``"rotate"``, ``"delete"``}:
+      * ``reorder | swap | move``: ``"order"`` is the 1-based page order to
+        apply on undo/redo. ``inverse.order`` is the pre-op order, so undo
+        restores it; ``forward.order`` is the post-op order so redo re-applies.
+      * ``rotate``: ``"page"`` (1-based) + ``"angle"``. ``inverse.angle`` is
+        the negative of the forward angle so undo rotates back.
+      * ``delete``: ``"page"`` (1-based slot where the page used to live) +
+        ``"cache_pdf"`` (path to a sidecar one-page PDF holding the deleted
+        page's content — needed to restore on undo). Redo simply re-deletes
+        that page.
 
 This module intentionally avoids touching the undo stack from inside
-``AnnotationEngine``; ``main_window`` is the orchestrator that calls
-``push_add(...)`` / ``push_delete(...)`` etc. with the matching snapshot.
+``AnnotationEngine`` or ``PDFManipulator``; ``main_window`` is the
+orchestrator that calls ``push_added(...)`` / ``push_deleted(...)`` /
+``push_page_op(...)`` with the matching snapshot.
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,8 +50,8 @@ MAX_DEPTH = 50
 
 @dataclass
 class UndoEntry:
-    action: str                  # "add" | "delete" | "edit_text"
-    page_index: int              # 0-based
+    action: str                  # "add" | "delete" | "edit_text" | "page_op"
+    page_index: int              # 0-based (unused for "page_op")
     forward: Dict[str, Any] = field(default_factory=dict)
     inverse: Dict[str, Any] = field(default_factory=dict)
 
@@ -173,8 +189,136 @@ class UndoStack:
                           forward=new_snap, inverse=old_snap)
         self.push(entry)
 
+    # ----------------------------------------------------- page-level ops
+    # Cache directory for one-page PDFs holding deleted-page content
+    # (needed so delete can be undone). Lives next to the source PDF so
+    # cleanup is straightforward; key is the source PDF's absolute path.
+    _page_cache_dirs: Dict[str, str] = {}
+
+    @classmethod
+    def _page_cache_dir(cls, src_path: str) -> str:
+        """Return (and lazily create) a sidecar cache directory for
+        one-page snapshots of deleted pages."""
+        d = cls._page_cache_dirs.get(src_path)
+        if d is None:
+            base = os.path.dirname(os.path.abspath(src_path))
+            d = os.path.join(base, ".undo_cache")
+            try:
+                os.makedirs(d, exist_ok=True)
+            except Exception:
+                # Fall back to a tempfile-private dir if the user's
+                # directory is read-only.
+                d = tempfile.mkdtemp(prefix="termipdf_undo_cache_")
+            cls._page_cache_dirs[src_path] = d
+        return d
+
+    def push_page_op(self, kind: str, *,
+                     page_a: Optional[int] = None,
+                     page_b: Optional[int] = None,
+                     src_page: Optional[int] = None,
+                     target_slot: Optional[int] = None,
+                     page: Optional[int] = None,
+                     angle: Optional[int] = None,
+                     deleted_page_pdf: Optional[str] = None) -> bool:
+        """Push a page-level undo entry.
+
+        ``kind`` selects the inverse/forward strategy:
+            * ``"swap"`` — provide ``page_a`` and ``page_b`` (1-based).
+              Undo re-swaps; redo re-swaps.
+            * ``"move"`` — provide ``src_page`` and ``target_slot``
+              (1-based, post-removal). Undo re-moves; redo re-moves.
+            * ``"rotate"`` — provide ``page`` (1-based) and ``angle``.
+              Undo rotates by ``-angle``.
+            * ``"delete"`` — provide ``page`` (1-based slot the deleted
+              page used to occupy) and ``deleted_page_pdf`` (path to a
+              one-page PDF holding the deleted page's content). Undo
+              re-merges that PDF at ``page``.
+
+        Returns True on success. Returns False (without pushing) if the
+        inputs don't make sense for ``kind``.
+        """
+        if not self.viewer or not self.viewer.path:
+            return False
+        kind = (kind or "").lower()
+        if kind == "swap":
+            if page_a is None or page_b is None:
+                return False
+            entry = UndoEntry(
+                action="page_op", page_index=0,
+                forward={"kind": "swap", "page_a": int(page_a),
+                         "page_b": int(page_b)},
+                inverse={"kind": "swap", "page_a": int(page_a),
+                         "page_b": int(page_b)},
+            )
+        elif kind == "move":
+            if src_page is None or target_slot is None:
+                return False
+            # move_page(src, tgt) is NOT self-inverse: redo from a
+            # restored pre-state needs the same call (src, tgt); undo
+            # from the post-state needs (current_post_slot, src). We
+            # store both pairs so the apply function picks the right
+            # one based on ``forward``.
+            entry = UndoEntry(
+                action="page_op", page_index=0,
+                forward={"kind": "move",
+                         "do_src": int(src_page),
+                         "do_tgt": int(target_slot)},
+                inverse={"kind": "move",
+                         # In the post-state, src_page's content is at
+                         # ``target_slot`` (move_page puts the moved
+                         # page there). To undo, move from
+                         # target_slot back to src_page.
+                         "do_src": int(target_slot),
+                         "do_tgt": int(src_page)},
+            )
+        elif kind == "rotate":
+            if page is None or angle is None:
+                return False
+            entry = UndoEntry(
+                action="page_op", page_index=0,
+                forward={"kind": "rotate", "page": int(page),
+                         "angle": int(angle)},
+                inverse={"kind": "rotate", "page": int(page),
+                         "angle": -int(angle)},
+            )
+        elif kind == "delete":
+            if page is None or not deleted_page_pdf:
+                return False
+            entry = UndoEntry(
+                action="page_op", page_index=0,
+                forward={"kind": "delete", "page": int(page)},
+                inverse={"kind": "delete", "page": int(page),
+                         "cache_pdf": str(deleted_page_pdf)},
+            )
+        else:
+            return False
+        self.push(entry)
+        return True
+
+    @staticmethod
+    def cache_deleted_page(src_path: str, page_1based: int) -> Tuple[bool, str, Optional[str]]:
+        """Extract the given page from ``src_path`` into a sidecar
+        one-page PDF and return its path. Used to build the payload for
+        ``push_page_op(kind="delete", ...)``.
+
+        Returns ``(ok, msg, cache_path)``. ``cache_path`` is ``None`` on
+        failure.
+        """
+        from features.pdf_editor.manipulation import PDFManipulator
+        cache_dir = UndoStack._page_cache_dir(src_path)
+        # Stable name per (path, page) — consecutive deletes of the
+        # same slot overwrite, keeping the cache small.
+        out_path = os.path.join(cache_dir, f"page_{page_1based}.pdf")
+        ok, msg = PDFManipulator.extract_pages(src_path, page_1based,
+                                               page_1based, out_path)
+        if not ok:
+            return False, msg, None
+        return True, msg, out_path
+
     # ---------------------------------------------------- apply inverse/fwd
     def _apply_inverse(self, entry: UndoEntry) -> Tuple[bool, str]:
+        if entry.action == "page_op":
+            return self._apply_page_op(entry.inverse, forward=False)
         page = self.viewer.get_page(entry.page_index)
         if entry.action == "add":
             # Forward was "add" — remove the matching annotation.
@@ -189,6 +333,8 @@ class UndoStack:
         return False, f"Unknown action: {entry.action}"
 
     def _apply_forward(self, entry: UndoEntry) -> Tuple[bool, str]:
+        if entry.action == "page_op":
+            return self._apply_page_op(entry.forward, forward=True)
         page = self.viewer.get_page(entry.page_index)
         if entry.action == "add":
             return self._recreate_annot(page, entry.forward)
@@ -199,6 +345,108 @@ class UndoStack:
             self._delete_matching(page, entry.inverse)
             return self._recreate_annot(page, entry.forward)
         return False, f"Unknown action: {entry.action}"
+
+    def _apply_page_op(self, payload: Dict[str, Any], *,
+                        forward: bool) -> Tuple[bool, str]:
+        """Dispatch a single page-op payload to the right PDFManipulator
+        call. Used by both ``_apply_inverse`` (with ``forward=False``)
+        and ``_apply_forward`` (with ``forward=True``).
+
+        After the on-disk write the engine is reloaded so the viewer
+        reflects the change immediately.
+        """
+        from features.pdf_editor.manipulation import PDFManipulator
+        path = self.viewer.path
+        kind = payload.get("kind")
+        try:
+            if kind == "swap":
+                # swap is its own inverse — just re-swap the same pair.
+                a = payload.get("page_a")
+                b = payload.get("page_b")
+                if a is None or b is None or a == b:
+                    return False, "page_op swap: missing or equal pages"
+                ok, msg = PDFManipulator.swap_pages(path, int(a), int(b))
+                if not ok:
+                    return False, msg
+            elif kind == "move":
+                # ``forward`` payload carries ``do_src`` + ``do_tgt``
+                # representing the move to perform right now
+                # (different for undo vs redo).
+                src = payload.get("do_src")
+                tgt = payload.get("do_tgt")
+                if src is None or tgt is None:
+                    return False, "page_op move: missing do_src/do_tgt"
+                if int(src) == int(tgt):
+                    # No-op (e.g. undoing a move that landed back on
+                    # itself — shouldn't happen but be safe).
+                    pass
+                else:
+                    ok, msg = PDFManipulator.move_page(
+                        path, int(src), int(tgt))
+                    if not ok:
+                        return False, msg
+            elif kind == "rotate":
+                page = payload.get("page")
+                angle = payload.get("angle")
+                if page is None or angle is None:
+                    return False, "page_op rotate: missing page/angle"
+                ok, msg = PDFManipulator.rotate_page(path, int(page),
+                                                     int(angle))
+                if not ok:
+                    return False, msg
+            elif kind == "delete":
+                page = payload.get("page")
+                if page is None:
+                    return False, "page_op delete: missing page"
+                if forward:
+                    # Redo a delete — just call delete_page again.
+                    ok, msg = PDFManipulator.delete_page(path, int(page))
+                    if not ok:
+                        return False, msg
+                else:
+                    # Undo a delete — re-merge the cached one-page PDF
+                    # back into the document. The cached PDF holds the
+                    # content of the deleted page; we merge it as a new
+                    # last page, then call move_page to slide it back
+                    # to its original slot.
+                    cache_pdf = payload.get("cache_pdf")
+                    if not cache_pdf or not os.path.isfile(cache_pdf):
+                        return False, "page_op delete: cache PDF missing"
+                    tmp = path + ".undodelete.tmp.pdf"
+                    ok, msg = PDFManipulator.merge_pdfs([path, cache_pdf],
+                                                        tmp)
+                    if not ok:
+                        return False, msg
+                    try:
+                        os.replace(tmp, path)
+                    except Exception as exc:
+                        return False, f"Replace failed: {exc}"
+                    # After merge the restored page is the last page
+                    # (slot = n). Use move_page to bring it back to
+                    # ``page`` (1-based).
+                    n = len(fitz.open(path))
+                    current_slot = n
+                    target = max(1, min(int(page), n))
+                    if current_slot != target:
+                        ok, msg = PDFManipulator.move_page(
+                            path, current_slot, target)
+                        if not ok:
+                            return False, msg
+            else:
+                return False, f"Unknown page_op kind: {kind!r}"
+        except Exception as exc:
+            return False, f"page_op {kind} failed: {exc}"
+
+        # Reload the engine so the viewer + Pages Manager see the new
+        # state. Swallow reload errors — the on-disk write already
+        # succeeded, the user just won't see the change until they
+        # close and reopen.
+        try:
+            if hasattr(self.viewer, "reload_from_disk"):
+                self.viewer.reload_from_disk()
+        except Exception:
+            pass
+        return True, "ok"
 
     # ----------------------------------------------------------- helpers
     def _delete_matching(self, page: fitz.Page, snap: Dict[str, Any]) -> bool:
