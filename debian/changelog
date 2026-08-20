@@ -5,4 +5,4 @@ termipdf (0.1.0-1) noble; urgency=medium
   * All 35 commands documented via in-app `help`.
   * Strict-mode debian/rules — no extra dh sequencer magic.
 
- -- Md. Shishir Kaysar Shuvon <shuvon@example.invalid>  Thu, 20 Aug 2026 15:07:04 +0000
+ -- Md. Shishir Kaysar Shuvon <mdshuvon1009@gmail.com>  Thu, 20 Aug 2026 15:07:04 +0000

@@ -1,7 +1,7 @@
 Source: termipdf
 Section: graphics
 Priority: optional
-Maintainer: Md. Shishir Kaysar Shuvon <shuvon@example.invalid>
+Maintainer: Md. Shishir Kaysar Shuvon <mdshuvon1009@gmail.com>
 Build-Depends: debhelper-compat (= 13),
                dh-python,
                python3:any,
