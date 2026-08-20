@@ -1,8 +1,8 @@
 # TermiPDF
 
-> A modern PDF editor with an embedded hacker-style terminal. Open, annotate, edit, reorder, and screenshot — every action lives one keystroke away.
+> A modern PDF editor with an embedded terminal. Open, annotate, edit, reorder, and screenshot — every action lives one keystroke away.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey) ![PDF](https://img.shields.io/badge/PDF-PyMuPDF-orange)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey) ![PDF](https://img.shields.io/badge/PDF-PyMuPDF-orange) [![Snap](https://img.shields.io/badge/snap-termipf-yellow?logo=snapcraft)](https://snapcraft.io/termipdf)
 
 ---
 
@@ -67,12 +67,22 @@
 
 ## 🚀 Quick Start
 
-### 1. Requirements
+### Ubuntu (one command)
+```bash
+sudo snap install termipdf
+```
+Then launch **TermiPDF** from your application menu, or:
+```bash
+termipdf
+```
+
+### From source
+#### 1. Requirements
 - Python **3.10 or newer**
 - A desktop environment (Linux, Windows, or macOS)
 - `requirements.txt` (4 packages): **PyQt6 ≥ 6.5**, **PyMuPDF ≥ 1.23**, **qrcode ≥ 7.4**, **Pillow ≥ 10**
 
-### 2. Install
+#### 2. Install
 ```bash
 git clone <repo-url> TermiPDF
 cd TermiPDF
@@ -82,7 +92,7 @@ source .venv/bin/activate          # Linux / macOS
 pip install -r requirements.txt
 ```
 
-### 3. Run
+#### 3. Run
 ```bash
 python src/main.py
 ```

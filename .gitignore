@@ -32,3 +32,14 @@ docs/screenshots/debug_*.png
 # ---- App scratch (never commit user data) -------------------------------
 *.autosave
 *.tmp
+
+# ---- Snap build artefacts ----------------------------------------------
+# Snapcraft keeps its caches and built .snap files inside the project
+# tree when you run `snapcraft` locally. Never commit them.
+*.snap
+snap/.snapcraft/
+parts/
+_stage/
+prime/
+_build/
+*.snap.keep

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=TermiPDF
+GenericName=PDF Editor
+Comment=A modern PDF editor with an embedded terminal.
+Exec=termipdf-wrapper %U
+Icon=${SNAP}/usr/share/icons/hicolor/256x256/apps/termipdf.png
+Type=Application
+Categories=Office;Viewer;Graphics;
+MimeType=application/pdf;
+Terminal=false
+StartupNotify=true
+StartupWMClass=TermiPDF
+Keywords=pdf;viewer;editor;annotation;terminal;qr;

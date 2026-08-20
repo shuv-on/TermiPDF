@@ -63,7 +63,7 @@ class TermColors(metaclass=_TermColorsMeta):
     """
 
     # Theme-specific accents that aren't in the palette. These keep the
-    # "hacker terminal" vibe while staying legible on either background.
+    # Keep the "terminal" aesthetic while staying legible on either background.
     _DARK = {
         "PROMPT":  "#a6e3a1",
         "COMMAND": "#cdd6f4",
@@ -127,7 +127,7 @@ class TerminalUI(QWidget):
 
         # Header row ------------------------------------------------------
         header = QHBoxLayout()
-        title = QLabel("● termipdf ~ hacker-console")
+        title = QLabel("● termipdf ~ terminal")
         title.setStyleSheet(f"color: {TermColors.ACCENT}; font-weight: bold;")
         self._title_label = title
         header.addWidget(title)
@@ -180,7 +180,7 @@ class TerminalUI(QWidget):
             f"<pre style='color:{TermColors.ACCENT};font-weight:bold;line-height:1.0'>"
             " ▀█▀ ▄▀█ █▀ █ █▀▀ █▀▀ █▄░█ █▀▀ █▀█\n"
             " █░█ █▀█ ▄█ █ ██▄ ██▄ █░▀█ ██▄ █▀▄\n"
-            f"  v2  · hacker console  · type <b style='color:{TermColors.SUCCESS}'>help</b> to start"
+            f"  v2  · terminal  · type <b style='color:{TermColors.SUCCESS}'>help</b> to start"
             "</pre>"
         )
         self._info("TermiPDF OS v2.0 initialized. Type <b>help</b> to list commands.")
@@ -231,7 +231,7 @@ class TerminalUI(QWidget):
         already uses ``TermColors.<name>`` at append time, so any text
         produced *after* the flip automatically picks up the new colour.
         """
-        # 1. Title label ("● termipdf ~ hacker-console")
+        # 1. Title label ("● termipdf ~ terminal")
         if hasattr(self, "_title_label"):
             self._title_label.setStyleSheet(
                 f"color: {TermColors.ACCENT}; font-weight: bold;"
