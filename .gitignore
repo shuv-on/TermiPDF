@@ -43,3 +43,14 @@ _stage/
 prime/
 _build/
 *.snap.keep
+
+# ---- Debian package build artefacts ------------------------------------
+# dpkg-buildpackage drops the .deb + .changes + .buildinfo into the
+# parent dir. Never commit them — regenerate per release.
+*.deb
+*.changes
+*.buildinfo
+debian/files
+debian/debhelper.log
+debian/*.substvars
+debian/*.debhelper

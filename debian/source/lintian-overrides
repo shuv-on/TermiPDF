@@ -1,0 +1,4 @@
+# Source-package lintian overrides.
+# Format: <tag> [package-name] [severity]
+# Empty by default — add overrides here if lintian reports false
+# positives on the source tree (e.g. very-long-line-in-source-file).

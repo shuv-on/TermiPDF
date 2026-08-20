@@ -9,6 +9,7 @@ one that fits your situation.
 | 2 | Automated — same machine | ~30 s | "Are all 108 internal checks still green?" |
 | 3 | Another device via .snap | ~10 min | "Does it run on a fresh Ubuntu install?" |
 | 4 | Snap packaging itself | ~10 min | "Will `snap install termipdf` actually work?" |
+| 5 | Build + install a `.deb` | ~5 min | "Will `sudo dpkg -i termipdf_*.deb` work?" |
 
 ---
 
@@ -222,6 +223,115 @@ snapcraft remote-build
 
 You get one `.snap` per supported architecture (currently `amd64`,
 `arm64`, `armhf`).
+
+---
+
+## 5. Build + install a `.deb`
+
+Useful when:
+- You want to install on a machine without the Snap daemon.
+- You're building for a private network / air-gapped environment.
+- You want apt to resolve the Python deps for you.
+
+### 5a. Build (one-time setup)
+
+```bash
+sudo apt install -y build-essential fakeroot debhelper devscripts lintian
+cd /path/to/TermiPDF
+dpkg-buildpackage -us -uc -b -nc
+ls -lh ../termipdf_*.deb
+```
+
+Flags:
+- `-us -uc` — don't sign source/changes (no GPG key needed for personal builds).
+- `-b` — binary-only build (skips the `.dsc` source package).
+- `-nc` — no clean (faster incremental rebuilds; drop for release builds).
+
+Outputs land in the **parent** directory:
+- `termipdf_0.1.0-1_amd64.deb` — the installable package
+- `termipdf_0.1.0-1_amd64.buildinfo` — build metadata
+- `termipdf_0.1.0-1_amd64.changes` — change log
+
+### 5b. Lint
+
+```bash
+lintian --info --display-info ../termipdf_0.1.0-1_amd64.deb
+```
+
+Must have **no `E:` errors**. Warnings are tolerated for personal
+builds; clean them up before publishing.
+
+### 5c. Install
+
+```bash
+sudo dpkg -i termipdf_0.1.0-1_amd64.deb
+sudo apt-get install -f        # fix any unmet deps if apt complains
+termipdf                       # launches the installed app
+```
+
+`dpkg -i` will pull these from apt automatically if they're not yet
+installed: `python3-pyqt6`, `python3-fitz`, `python3-qrcode`,
+`python3-pil`, plus 20 Qt6 system libs (libxcb, libgl1, etc.).
+
+### 5d. Verify the install
+
+```bash
+dpkg -l termipdf              # confirm installed
+dpkg -L termipdf              # list every file the package owns
+which termipdf                # /usr/bin/termipdf
+man termipdf                  # man page from /usr/share/man/man1/
+xdg-open /path/to/some.pdf    # opens in TermiPDF
+```
+
+### 5e. Uninstall
+
+```bash
+sudo apt remove termipdf
+sudo apt autoremove           # pulls in any orphan Python deps
+```
+
+### 5f. Cross-device transfer
+
+```bash
+# Source — copy the .deb (and any cpu-arch-specific .debs)
+scp ../termipdf_*.deb user@target:/tmp/
+
+# Target (Ubuntu 22.04 / 24.04 / 25.04 with the same arch)
+sudo apt update
+sudo dpkg -i /tmp/termipdf_*.deb
+sudo apt-get install -f
+```
+
+### 5g. Known build-deps to install
+
+`dpkg-buildpackage` enforces `Build-Depends` in `debian/control`.
+You need:
+
+```bash
+sudo apt install -y \
+    build-essential fakeroot debhelper devscripts \
+    dh-python python3-pyqt6 python3-all
+```
+
+If you already have `dpkg-buildpackage` working without these, the
+`-d` flag skips the check (still builds, but doesn't guarantee a
+clean build-root):
+
+```bash
+dpkg-buildpackage -us -uc -b -nc -d
+```
+
+### 5h. Common errors
+
+| Error | Cause | Fix |
+|---|---|---|
+| `Unmet build dependencies: dh-python python3-pyqt6` | First-time build-host | `sudo apt install -y dh-python python3-pyqt6` |
+| `dpkg-gencontrol: warning: Depends field ... ${python3:Depends} used` | `dh-python` not active in rules | Already covered by `dh $@` if `debhelper-compat` ≥ 12 |
+| `package-installs-python-pycache-dir` (lintian E) | Stale `__pycache__/` in `src/` | `find src -name __pycache__ -prune -exec rm -rf {} +` then rebuild |
+| `description-synopsis-starts-with-article` (lintian W) | Description starts with "A/An/The" | Rephrase: change "A modern PDF editor" to "Modern PDF editor" |
+| `debian-changelog-has-wrong-day-of-week` (lintian W) | Date string doesn't match the calendar day | Use `date '+%a, %d %b %Y %H:%M:%S %z' -u` and copy into `debian/changelog` |
+| `dpkg-deb: building package 'termipdf' in '../termipdf_*.deb' works but install fails with "dependency problems"` | Missing apt deps on the target | `sudo apt-get install -f` to fetch them |
+| `termipdf: command not found` after install | `/usr/bin` not on PATH, or package didn't actually install | `echo $PATH` then `dpkg -L termipdf \| grep bin` |
 
 ---
 

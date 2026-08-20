@@ -1,0 +1,10 @@
+# debian/manpages — list of man pages to install.
+#
+# Format: one path per line. The path is relative to the source root
+# (where debian/ lives). Files here are gzip-compressed and installed
+# under /usr/share/man/manN/<name>.N.gz automatically by dh_installman.
+#
+# An empty file is valid (no man pages from source). When a .1 file is
+# added under debian/, list it here.
+
+debian/termipdf.1

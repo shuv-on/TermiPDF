@@ -1,0 +1,8 @@
+termipdf (0.1.0-1) noble; urgency=medium
+
+  * Initial release.
+  * PyQt6 desktop PDF editor with embedded terminal.
+  * All 35 commands documented via in-app `help`.
+  * Strict-mode debian/rules — no extra dh sequencer magic.
+
+ -- Md. Shishir Kaysar Shuvon <shuvon@example.invalid>  Thu, 20 Aug 2026 15:07:04 +0000

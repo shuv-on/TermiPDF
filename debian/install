@@ -1,0 +1,7 @@
+# debian/install — explicit file-by-file install list.
+#
+# Most of the layout is handled by debian/rules (override_dh_auto_install),
+# but ``debian/install`` can also install loose files. Anything declared
+# here is added on top of the staging done in rules.
+#
+# This file is empty by design; the comment is the documentation.

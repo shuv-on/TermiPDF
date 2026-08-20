@@ -76,6 +76,19 @@ Then launch **TermiPDF** from your application menu, or:
 termipdf
 ```
 
+### Debian / Ubuntu via .deb
+Download `termipdf_0.1.0-1_amd64.deb` from the
+[Releases page](https://github.com/shuv-on/TermiPDF/releases), then:
+```bash
+sudo dpkg -i termipdf_0.1.0-1_amd64.deb
+sudo apt-get install -f         # resolves missing apt deps if any
+termipdf
+```
+The `.deb` pulls PyQt6 + PyMuPDF + Pillow + qrcode from apt
+(`python3-pyqt6`, `python3-fitz`, `python3-pil`, `python3-qrcode`)
+so no `pip install` is needed. See **[TESTING.md](TESTING.md) § 5**
+for how to build the .deb from source.
+
 ### From source
 #### 1. Requirements
 - Python **3.10 or newer**
@@ -84,7 +97,7 @@ termipdf
 
 #### 2. Install
 ```bash
-git clone <repo-url> TermiPDF
+git clone <repo-url> TermipDF
 cd TermiPDF
 python3 -m venv .venv
 source .venv/bin/activate          # Linux / macOS

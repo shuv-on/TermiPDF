@@ -1,0 +1,81 @@
+.TH TERMIPDF 1 "August 2026" "termipdf 0.1.0" "User Commands"
+.SH NAME
+termipdf \- a modern PDF editor with an embedded terminal
+.SH SYNOPSIS
+.B termipdf
+[\fIPATH\fR]
+.SH DESCRIPTION
+\fBTermiPDF\fR is a PyQt6 desktop PDF editor with a built-in terminal for
+batch operations.  It opens any PDF, lets you annotate, edit pages, and
+exposes every feature as a typed command.
+.PP
+If \fIPATH\fR is given, that PDF is opened on launch.  Otherwise
+\fBtermipdf\fR starts with an empty workspace.
+.SH FEATURES
+.TP
+\fBViewer\fR
+Single-page or continuous-scroll, zoom, fit-to-window, outline (TOC)
+sidebar, thumbnail rail.
+.TP
+\fBAnnotate\fR
+Freehand ink, multi-colour highlights, sticky notes, shapes
+(rect, ellipse, arrow), and Unicode text insertion (including Bangla).
+.TP
+\fBEdit pages\fR
+Delete, rotate, swap, split, merge, reorder, extract, and generate
+new PDFs from current pages.
+.TP
+\fBTools\fR
+QR-share popups, image-to-PDF conversion, full-text search with
+auto-highlight, undo/redo, save.
+.TP
+\fBThemes\fR
+Dark (Dracula/Nord) and light (Edge-like); auto-detected from your OS
+preference and persisted across sessions.
+.TP
+\fBTerminal\fR
+An embedded terminal docks at the bottom of the window.  Every
+feature is available as a typed command.  Press \fBCtrl+T\fR (or
+\fBCtrl+\`\fR) to show it, then type \fBhelp\fR to list every command.
+.SH KEYBOARD SHORTCUTS
+.TP
+.B Ctrl+O
+Open a PDF.
+.TP
+.B Ctrl+S
+Save annotations into the current PDF.
+.TP
+.B Ctrl+T
+Toggle the embedded terminal.
+.TP
+.B Ctrl+`
+Toggle the embedded terminal (alternate).
+.TP
+.B Ctrl+Shift+T
+Toggle between dark and light themes.
+.TP
+.B Ctrl+F
+Find text on the page.
+.TP
+.B Ctrl+P
+Print the current document.
+.TP
+.B F11
+Toggle fullscreen.
+.TP
+.B Ctrl+Q
+Quit.
+.SH FILES
+.TP
+.I ~/.config/TermiPDF/TermiPDF.conf
+Persistent settings (theme, recent files, dock layout).
+.TP
+.I ~/.local/share/TermiPDF/
+Crash logs and autosave data.
+.SH SEE ALSO
+The project README at \fIhttps://github.com/shuv-on/TermiPDF\fR for
+the full command reference and example workflows.
+.SH AUTHOR
+Md. Shishir Kaysar Shuvon (\fIshuv-on\fR).
+.SH LICENSE
+MIT License.

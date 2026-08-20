@@ -1,0 +1,77 @@
+#!/usr/bin/make -f
+#
+# TermiPDF — debian/rules
+#
+# Single-binary-package build: stage the `src/` tree under
+# /usr/share/termipdf/src, install the launcher to /usr/bin/termipdf,
+# drop the .desktop file into /usr/share/applications, and register
+# the icon with hicolor.
+#
+# We override dh_auto_install because TermiPDF is not a pip-installable
+# Python package (no pyproject.toml / setup.py); the source tree is
+# used as-is.
+#
+# All Python dependencies are pulled from apt (python3-pyqt6,
+# python3-fitz, python3-qrcode, python3-pil) — see debian/control.
+
+# Enable debhelper's verbose build output and fail on any warning.
+export DH_VERBOSE = 1
+export DH_OPTIONS = -v
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	# Stage the src/ tree as /usr/share/termipdf/src so that
+	# `Path(__file__).resolve().parents[3]` (used by src/shared/utils/
+	# path_solver.py) resolves to /usr/share/termipdf — keeping the
+	# QSS stylesheet loader and theme manager working as designed.
+	install -d $(CURDIR)/debian/termipdf/usr/share/termipdf
+	# rsync so we can exclude __pycache__ and .pyc files (lintian
+	# flags these as policy violations in shipped packages). Also
+	# skip the dev fixture test.pdf — it's only for local testing.
+	rsync -a --exclude='__pycache__' --exclude='*.pyc' \
+		--exclude='test.pdf' \
+		$(CURDIR)/src/ \
+		$(CURDIR)/debian/termipdf/usr/share/termipdf/src/
+
+	# Launcher script → /usr/bin/termipdf (executable for everyone).
+	install -D -m 0755 $(CURDIR)/debian/launcher \
+		$(CURDIR)/debian/termipdf/usr/bin/termipdf
+
+	# XDG desktop entry.
+	install -D -m 0644 $(CURDIR)/debian/termipdf.desktop \
+		$(CURDIR)/debian/termipdf/usr/share/applications/termipdf.desktop
+
+	# App icon — registered with the hicolor theme so any desktop
+	# environment picks it up.
+	install -D -m 0644 $(CURDIR)/snap/gui/termipdf.png \
+		$(CURDIR)/debian/termipdf/usr/share/icons/hicolor/256x256/apps/termipdf.png
+
+override_dh_auto_build:
+	# No compilation step — TermiPDF is pure Python with Qt resource
+	# files (the QSS sheets under src/shared/styles/ are loaded at
+	# runtime). Skip dh_auto_build so we don't run an empty setup.py.
+
+override_dh_auto_test:
+	# Skip upstream's test suite. The 108-check smoke test lives in
+	# tests/smoke_test.py but requires the source tree to be on
+	# sys.path; it runs from `make test` in the developer workflow,
+	# not from a deb build. Skipping here keeps `dpkg-buildpackage`
+	# clean on systems without PyQt6 installed.
+
+override_dh_installdocs:
+	dh_installdocs README.md TESTING.md
+
+# dh_strip would fail on a Python-only package (no ELF binaries to
+# strip); dh_strip_nodoc is the right sequencer for documentation-only
+# packages. We DO have no binary to strip, so this is a no-op but it
+# silences an annoying lintian note.
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+binary-arch: build
+	dh binary-arch
+
+binary: binary-arch binary-indep
+	dh binary

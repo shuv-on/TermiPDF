@@ -1,0 +1,30 @@
+#!/bin/sh
+# termipdf — Debian launcher for TermiPDF.
+#
+# The source tree is staged at /usr/share/termipdf/src (see
+# debian/rules). The `src/shared/utils/path_solver.py` file resolves
+# the project root via `Path(__file__).resolve().parents[3]`, which
+# lands at /usr/share/termipdf — exactly where src/shared/styles/
+# lives, so dark/light theming works without any environment trick.
+
+set -e
+
+# Make the source tree importable as a package collection (src.main,
+# src.shared.utils, src.features.terminal, ...).
+SHARE_DIR=/usr/share/termipdf
+if [ -z "${PYTHONPATH:-}" ]; then
+    PYTHONPATH="$SHARE_DIR"
+else
+    PYTHONPATH="$SHARE_DIR:$PYTHONPATH"
+fi
+export PYTHONPATH
+
+# Use the system's Qt platform plugin (Adwaita on GNOME, Breeze on
+# KDE). Falls back to qt5ct or whatever the DE provides.
+export QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-gnome}"
+
+# Honour the user's locale.
+unset LC_ALL
+export LANG="${LANG:-C.UTF-8}"
+
+exec python3 -m src.main "$@"
