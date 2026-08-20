@@ -1,7 +1,7 @@
 name: termipdf
 base: core22
 version: "0.1.0"
-summary: A modern PDF editor with an embedded terminal.
+summary: Modern PDF editor with an embedded terminal
 description: |
   TermiPDF is a PyQt6 desktop PDF editor with a built-in terminal
   for batch operations.
@@ -28,6 +28,12 @@ description: |
 
 grade: stable
 confinement: strict
+contact: shuv-on@users.noreply.github.com
+issues: https://github.com/shuv-on/TermiPDF/issues
+source-code: https://github.com/shuv-on/TermiPDF
+website: https://github.com/shuv-on/TermiPDF
+
+icon: snap/gui/termipdf.png
 
 apps:
   termipdf:
@@ -37,17 +43,12 @@ apps:
     desktop: usr/share/applications/termipdf.desktop
     plugs:
       - home                            # read/write PDFs in $HOME
-      - network                         # (future: remote PDFs)
       - desktop                         # .desktop file + icon
       - desktop-legacy                  # X11 fallback for older toolkits
       - x11                             # X11 display
       - wayland                         # Wayland display
       - opengl                          # Qt6 needs OpenGL
       - removable-media                 # PDFs on USB sticks
-      - audio-playback                  # (future)
-      - camera                          # (future)
-      - browser-support                 # QtWebEngine (future)
-      - ssh-public-keys                 # (future: SSH-signed PDFs)
 
 parts:
   # ------------------------------------------------------------------

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"
+     width="256" height="256">
+  <title>TermiPDF</title>
+  <desc>Crimson-bordered cream rounded square with a white PDF page,
+        red corner-fold, three faded body lines, a bold red accent
+        line, and a small green terminal chevron.</desc>
+
+  <!-- 1. Crimson rounded background -->
+  <rect x="6" y="6" width="244" height="244" rx="32" ry="32"
+        fill="#F8F1E7" stroke="#8B0000" stroke-width="8"/>
+
+  <!-- 2. Faint 'T' watermark -->
+  <g opacity="0.16" fill="#8B0000">
+    <rect x="58" y="58"  width="140" height="30"/>
+    <rect x="116" y="58" width="24"  height="140"/>
+  </g>
+
+  <!-- 3. White page rectangle -->
+  <rect x="52" y="62" width="152" height="144" rx="8" ry="8"
+        fill="#FFFFFF"/>
+
+  <!-- 4. PDF corner-fold top-right -->
+  <polygon points="170,62 204,62 204,96"
+           fill="#8B0000"/>
+  <line x1="170" y1="62" x2="204" y2="96"
+        stroke="#5F0000" stroke-width="1.5"/>
+
+  <!-- 5. Three faded body lines -->
+  <rect x="72"  y="96"  width="112" height="7" rx="3.5" fill="#B4B8C4"/>
+  <rect x="72"  y="116" width="98"  height="7" rx="3.5" fill="#B4B8C4"/>
+  <rect x="72"  y="136" width="106" height="7" rx="3.5" fill="#B4B8C4"/>
+
+  <!-- 6. Bold red accent line -->
+  <rect x="72"  y="158" width="112" height="9" rx="4" fill="#B41C1C"/>
+
+  <!-- 7. Green terminal chevron (small, inside page) -->
+  <polygon points="170,180 196,202 170,224"
+           fill="#4CAF50"/>
+</svg>
