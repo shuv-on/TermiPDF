@@ -816,21 +816,47 @@ class IconFactory:
     """Render icons via QPainter. Stateless; safe to call from any thread."""
 
     @staticmethod
-    def get(name: str, size: int = 24, color: str = "#cdd6f4") -> QIcon:
-        """Return a QIcon for the given name, rendered at `size`x`size`."""
+    def _default_color() -> str:
+        """Return the foreground colour that contrasts with the current
+        theme.
+
+        Falls back to a dark-mode legible off-white if no QApplication
+        is alive yet (eg the very first icons during `__init__`,
+        before any window is shown).
+        """
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.QtGui import QPalette
+            app = QApplication.instance()
+            if app is not None:
+                return app.palette().color(QPalette.ColorRole.WindowText).name()
+        except Exception:
+            pass
+        return "#cdd6f4"
+
+    @staticmethod
+    def get(name: str, size: int = 24, color: str | None = None) -> QIcon:
+        """Return a QIcon for the given name, rendered at `size`x`size`.
+
+        ``color`` defaults to the current theme's ``WindowText`` colour
+        so the icon is legible in both dark and light themes. Pass an
+        explicit hex (`"#cba6f7"`) to override.
+        """
         if name not in _PAINTERS:
             # Unknown icon → render an empty QIcon to avoid crashes
             return QIcon()
+        col = color if color else IconFactory._default_color()
         icon = QIcon()
-        pm = IconFactory._render(name, size, QColor(color))
+        pm = IconFactory._render(name, size, QColor(col))
         icon.addPixmap(pm)
         return icon
 
     @staticmethod
-    def pixmap(name: str, size: int = 24, color: str = "#cdd6f4") -> QPixmap:
+    def pixmap(name: str, size: int = 24, color: str | None = None) -> QPixmap:
         if name not in _PAINTERS:
             return QPixmap()
-        return IconFactory._render(name, size, QColor(color))
+        col = color if color else IconFactory._default_color()
+        return IconFactory._render(name, size, QColor(col))
 
     @staticmethod
     def _render(name: str, size: int, color: QColor) -> QPixmap:
@@ -845,9 +871,11 @@ class IconFactory:
         return pm
 
     @staticmethod
-    def paint(painter: QPainter, name: str, rect: QRectF, color: str = "#cdd6f4"):
+    def paint(painter: QPainter, name: str, rect: QRectF,
+              color: str | None = None):
         if name in _PAINTERS:
-            _PAINTERS[name](painter, rect, QColor(color))
+            col = color if color else IconFactory._default_color()
+            _PAINTERS[name](painter, rect, QColor(col))
 
     @staticmethod
     def available() -> list[str]:

@@ -1,4 +1,33 @@
-# docs/ is now tracked (it ships screenshots + screenshot index).
-# Ignore only the build artefact that capture_screenshots.py writes
-# when synthesizing the image-PDF in scenario_11.
+# ---- Python -------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# ---- OS junk ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# ---- Editor / IDE -------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+
+# ---- Screenshot tooling (kept on disk for maintainers, hidden on GitHub) -
+# The 12 gallery PNGs in docs/screenshots/ ARE tracked so the README renders
+# on GitHub for every visitor. Only the helpers + scratch outputs are hidden:
+tests/capture_screenshots.py
+tests/capture_real_app.py
+tests/capture_lightmode_debug.py
+tests/make_demo_pdf.py
 docs/screenshots/_assets/_seed.png
+docs/screenshots/_assets/demo.pdf
+docs/screenshots/_assets/from_images.pdf
+docs/screenshots/debug_*.png
+
+# ---- App scratch (never commit user data) -------------------------------
+*.autosave
+*.tmp

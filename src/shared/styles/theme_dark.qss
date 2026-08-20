@@ -250,6 +250,20 @@ QTabBar::tab:hover {
     color: #cdd6f4;
 }
 
+/* Close (×) button on each tab. */
+QTabBar::close-button {
+    subcontrol-position: right;
+    image: none;
+    background-color: transparent;
+    border-radius: 8px;
+}
+QTabBar::close-button:hover {
+    background-color: #313244;
+}
+QTabBar::close-button:pressed {
+    background-color: #45475a;
+}
+
 /* ---------- Scrollbars ---------- */
 QScrollBar:vertical {
     background: #181825;

@@ -55,7 +55,15 @@ class ThemeManager(QObject):
         return AUTO_VALUE
 
     def set(self, theme: str) -> None:
-        """Set + persist theme. Accepts 'dark' or 'light'."""
+        """Set + persist theme. Accepts 'dark' or 'light'.
+
+        Re-applies the active QSS + palette to the live QApplication so
+        the visible UI updates immediately. Without this re-apply the
+        ``themeChanged`` signal only refreshes non-QSS items (icon, mode
+        badge) and the chrome stays in the old theme — which is what the
+        user sees when they click the toolbar toggle and "nothing
+        happens".
+        """
         theme = theme.lower()
         if theme not in VALID_THEMES:
             raise ValueError(f"Unknown theme: {theme!r}")
@@ -63,6 +71,12 @@ class ThemeManager(QObject):
             return
         self._settings.setValue(SETTING_KEY, theme)
         self._current = theme
+        # Re-apply the QSS to the live app BEFORE emitting the signal so
+        # any handler that reads ``self.current()`` and re-paints
+        # already sees the new palette.
+        app = QApplication.instance()
+        if app is not None:
+            self.apply_to(app)
         self.themeChanged.emit(theme)
 
     def toggle(self) -> None:

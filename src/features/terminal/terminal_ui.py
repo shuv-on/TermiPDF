@@ -19,6 +19,7 @@ from PyQt6.QtGui import (
     QColor,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -29,16 +30,76 @@ from PyQt6.QtWidgets import (
 )
 
 
-# Dracula-inspired palette
-class TermColors:
-    PROMPT = "#a6e3a1"
-    COMMAND = "#cdd6f4"
-    INFO = "#89b4fa"
-    SUCCESS = "#a6e3a1"
-    WARNING = "#f9e2af"
-    ERROR = "#f38ba8"
-    ACCENT = "#cba6f7"
-    MUTED = "#6c7086"
+# Theme-aware palette. The colours are picked at first read (and every
+# time ``rebind_palette`` is called) from the running QApplication's
+# palette + named accent colours that work in both themes.
+class _TermColorsMeta(type):
+    """Metaclass so ``TermColors.ACCENT`` works at *class* access time.
+
+    A normal ``__getattr__`` classmethod is only invoked for *instance*
+    attribute misses; class-level attribute access skips it entirely. The
+    metaclass intercepts ``TermColors.<name>`` and returns the colour from
+    the current theme table on every read.
+    """
+
+    def __getattr__(cls, name: str):
+        # Skip dunder / private lookups — never shadow real class machinery.
+        if name.startswith("_") or name in (
+            "is_dark", "_table", "_DARK", "_LIGHT",
+        ):
+            raise AttributeError(name)
+        table = cls._DARK if cls.is_dark() else cls._LIGHT
+        if name in table:
+            return table[name]
+        raise AttributeError(f"TermColors has no {name!r}")
+
+
+class TermColors(metaclass=_TermColorsMeta):
+    """Hacker-style terminal palette that adapts to the active theme.
+
+    We expose hex strings because QTextEdit's HTML formatter wants raw
+    colour names. The QSS may have just refreshed in another module, so
+    every read goes back to QApplication to pick up the latest palette.
+    """
+
+    # Theme-specific accents that aren't in the palette. These keep the
+    # "hacker terminal" vibe while staying legible on either background.
+    _DARK = {
+        "PROMPT":  "#a6e3a1",
+        "COMMAND": "#cdd6f4",
+        "INFO":    "#89b4fa",
+        "SUCCESS": "#a6e3a1",
+        "WARNING": "#f9e2af",
+        "ERROR":   "#f38ba8",
+        "ACCENT":  "#cba6f7",
+        "MUTED":   "#6c7086",
+    }
+    _LIGHT = {
+        # Light theme: deeper, saturated accent colours so they pop on
+        # white. The "muted" and "command" tones come from the palette
+        # via ``_fg`` / ``_muted`` below for a consistent feel.
+        "PROMPT":  "#2e8b3e",   # green ~700
+        "COMMAND": "#1f1f1f",   # text
+        "INFO":    "#0067c0",   # link / focus blue
+        "SUCCESS": "#2e8b3e",
+        "WARNING": "#a45a00",   # amber
+        "ERROR":   "#c42b1c",   # danger red (matches QPushButton#danger)
+        "ACCENT":  "#7c3aed",   # purple 600 — readable on white
+        "MUTED":   "#6c7086",   # slate
+    }
+
+    @classmethod
+    def is_dark(cls) -> bool:
+        app = QApplication.instance()
+        if app is None:
+            return True
+        try:
+            from PyQt6.QtGui import QPalette
+            bg = app.palette().color(QPalette.ColorRole.Window)
+            h, s, l, _ = bg.getHslF()
+            return l <= 0.55
+        except Exception:
+            return True
 
 
 class TerminalUI(QWidget):
@@ -68,6 +129,7 @@ class TerminalUI(QWidget):
         header = QHBoxLayout()
         title = QLabel("● termipdf ~ hacker-console")
         title.setStyleSheet(f"color: {TermColors.ACCENT}; font-weight: bold;")
+        self._title_label = title
         header.addWidget(title)
         header.addStretch(1)
 
@@ -99,6 +161,7 @@ class TerminalUI(QWidget):
         prompt_label.setStyleSheet(
             f"color: {TermColors.PROMPT}; font-weight: bold; font-size: 16px;"
         )
+        self._prompt_label = prompt_label
         prompt_label.setFixedWidth(20)
         input_row.addWidget(prompt_label)
 
@@ -110,12 +173,14 @@ class TerminalUI(QWidget):
         root.addLayout(input_row)
 
     def _print_banner(self):
-        # ASCII banner — kept short and bold; no logo icon (icons are toolbar-only)
+        # ASCII banner — kept short and bold; no logo icon (icons are toolbar-only).
+        # Colours come from TermColors so the banner adapts to the active theme
+        # (and re-prints cleanly when the theme flips, via rebind_palette()).
         self.output.append(
-            "<pre style='color:#cba6f7;font-weight:bold;line-height:1.0'>"
+            f"<pre style='color:{TermColors.ACCENT};font-weight:bold;line-height:1.0'>"
             " ▀█▀ ▄▀█ █▀ █ █▀▀ █▀▀ █▄░█ █▀▀ █▀█\n"
             " █░█ █▀█ ▄█ █ ██▄ ██▄ █░▀█ ██▄ █▀▄\n"
-            "  v2  · hacker console  · type <b style='color:#a6e3a1'>help</b> to start"
+            f"  v2  · hacker console  · type <b style='color:{TermColors.SUCCESS}'>help</b> to start"
             "</pre>"
         )
         self._info("TermiPDF OS v2.0 initialized. Type <b>help</b> to list commands.")
@@ -156,6 +221,34 @@ class TerminalUI(QWidget):
     def clear_output(self):
         self.output.clear()
         self._print_banner()
+
+    # ----------------------------------------------------------- Theming
+    def rebind_palette(self) -> None:
+        """Re-pick the theme-aware colours and refresh chrome that is
+        ``setStyleSheet``-driven (the title label, prompt glyph, banner).
+
+        Called from ``main_window`` when the theme flips. Output text
+        already uses ``TermColors.<name>`` at append time, so any text
+        produced *after* the flip automatically picks up the new colour.
+        """
+        # 1. Title label ("● termipdf ~ hacker-console")
+        if hasattr(self, "_title_label"):
+            self._title_label.setStyleSheet(
+                f"color: {TermColors.ACCENT}; font-weight: bold;"
+            )
+        # 2. Prompt glyph (the "›" before the input box)
+        if hasattr(self, "_prompt_label"):
+            self._prompt_label.setStyleSheet(
+                f"color: {TermColors.PROMPT}; font-weight: bold; font-size: 16px;"
+            )
+        # 3. Re-emit the banner so the big purple ASCII art picks up the
+        #    new accent colour. The history/buffer above isn't touched
+        #    (we don't rewrite the past — only future chrome updates).
+        if hasattr(self, "output") and self.output.document().blockCount() <= 4:
+            # Output is essentially empty (just the banner) → safe to
+            # refresh so the user sees the accent change immediately.
+            self.output.clear()
+            self._print_banner()
 
     # ----------------------------------------------------------- Helpers
     @staticmethod

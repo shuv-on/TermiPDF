@@ -507,6 +507,9 @@ class TermiPDFWindow(QMainWindow):
     def _add_toolbar_button(self, tb, icon_name, tooltip, shortcut,
                              slot, checkable=False) -> QToolButton:
         btn = QToolButton(tb)
+        # Stash the source icon name so ``_on_theme_changed`` can re-render
+        # the icon with the *new* theme's foreground colour.
+        btn._termipdf_icon_name = icon_name
         btn.setIcon(IconFactory.get(icon_name, 20))
         btn.setToolTip(f"{tooltip}  ({shortcut})" if shortcut else tooltip)
         # NB: we deliberately do NOT call btn.setShortcut(shortcut) here
@@ -2166,6 +2169,39 @@ class TermiPDFWindow(QMainWindow):
         self.theme_btn.setToolTip(tip + "  (Ctrl+Shift+T)")
 
     def _on_theme_changed(self, _name: str):
+        """Re-paint every chrome element that depends on the theme.
+
+        Called whenever ``ThemeManager.set`` flips dark↔light. We walk
+        the dock-position buttons + chevron + theme button + every
+        toolbar QToolButton (each one stores its source icon name on
+        ``_termipdf_icon_name`` so we can re-render at the right colour).
+        The QSS itself is re-applied by ``ThemeManager.set`` *before* the
+        signal fires.
+        """
+        # Dock-position buttons (live on the terminal dock, not on self).
+        dock = getattr(self, "term_dock", None)
+        if dock is not None and hasattr(dock, "_pos_buttons"):
+            for pos, btn in dock._pos_buttons.items():
+                icon_name = getattr(btn, "_termipdf_icon_name", None)
+                if icon_name:
+                    btn.setIcon(IconFactory.get(icon_name, 14))
+        # Chevron (collapse/expand).
+        if hasattr(self, "chevron_btn"):
+            icon_name = "chevron-down" if self.chevron_btn.isChecked() else "chevron-up"
+            self.chevron_btn.setIcon(IconFactory.get(icon_name, 20))
+        # Toolbar buttons: re-render from the now-current colour.
+        tb = self.findChild(QToolBar, "MainBar")
+        if tb is not None:
+            for btn in tb.findChildren(QToolButton):
+                icon_name = getattr(btn, "_termipdf_icon_name", None)
+                if icon_name:
+                    btn.setIcon(IconFactory.get(icon_name, 20))
+        # Terminal banner / prompt glyph uses theme-aware TermColors.
+        # Already-painted history text keeps its original colour; only
+        # the chrome (title, prompt, banner when buf is short) refreshes.
+        if hasattr(self, "terminal"):
+            self.terminal.rebind_palette()
+
         self._refresh_theme_button()
         # Force repaint of any custom-drawn widgets
         self._update_mode_badge(self._active_tool.value)
@@ -2479,6 +2515,7 @@ class TermiPDFWindow(QMainWindow):
             from PyQt6.QtWidgets import QToolButton
             btn = QToolButton(self)
             btn.setObjectName("toolbarRevealBtn")
+            btn._termipdf_icon_name = "chevron-down"
             btn.setIcon(IconFactory.get("chevron-down", 20))
             btn.setToolTip("Show toolbar (Ctrl+Shift+H)")
             btn.setAutoRaise(False)
@@ -3294,6 +3331,8 @@ class DockableTerminal(QDockWidget):
                                 ("float",  "dock-float")):
             btn = QToolButton()
             btn.setObjectName("dockPosition")
+            # Stash the icon name so theme changes can re-render.
+            btn._termipdf_icon_name = icon_name
             btn.setIcon(IconFactory.get(icon_name, 14))
             btn.setToolTip(f"Dock {pos}")
             btn.setCheckable(True)
@@ -3304,6 +3343,7 @@ class DockableTerminal(QDockWidget):
         # Close (just hide)
         close_btn = QToolButton()
         close_btn.setObjectName("dockHandle")
+        close_btn._termipdf_icon_name = "close"
         close_btn.setIcon(IconFactory.get("close", 14))
         close_btn.setToolTip("Hide terminal  (Ctrl+J to bring it back)")
         close_btn.clicked.connect(self.hide)
