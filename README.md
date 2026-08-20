@@ -243,12 +243,9 @@ python tests/smoke_test.py
 
 You should see `ALL 108 CHECKS PASSED ✓` at the bottom. The suite exercises page-level ops, rotation, swapping, deletion, image-to-PDF, QR generation, the recent-files store, and every text/annotation engine.
 
-To regenerate the screenshots in this README:
-
-```bash
-python tests/make_demo_pdf.py        # build the demo fixture
-python tests/capture_screenshots.py  # write docs/screenshots/*.png
-```
+For a complete testing guide (interactive UI walkthrough, headless
+screenshot capture, snap packaging, cross-device install), see
+**[TESTING.md](TESTING.md)**.
 
 ---
 
