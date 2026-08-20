@@ -1,0 +1,355 @@
+/* ============================================
+   TermiPDF — Dracula / Nord Dark Theme
+   ============================================ */
+
+QWidget {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    font-family: "JetBrains Mono", "Consolas", "Cascadia Code", monospace;
+    font-size: 13px;
+}
+
+QMainWindow {
+    background-color: #181825;
+}
+
+/* ---------- Toolbar ---------- */
+QToolBar#MainBar {
+    background-color: #11111b;
+    border: none;
+    spacing: 0;
+    padding: 0;
+}
+QToolBar#MainBar::separator {
+    background-color: #313244;
+    width: 1px;
+    margin: 6px 4px;
+}
+QToolBar QToolButton {
+    background-color: transparent;
+    color: #cdd6f4;
+    border: none;
+    border-radius: 6px;
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    margin: 4px 2px;
+}
+QToolBar QToolButton:hover {
+    background-color: #313244;
+    color: #f9e2af;
+}
+QToolBar QToolButton:pressed {
+    background-color: #45475a;
+}
+QToolBar QToolButton:checked {
+    background-color: #89b4fa;
+    color: #11111b;
+}
+QToolBar QToolButton:disabled {
+    color: #45475a;
+}
+
+QToolBar QLabel#toolbarLabel {
+    color: #a6adc8;
+    padding: 0 6px;
+}
+
+QToolBar QLineEdit {
+    background-color: #181825;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 4px 8px;
+    max-height: 30px;
+    min-width: 160px;
+}
+
+/* ---------- Menubar ---------- */
+QMenuBar {
+    background-color: #11111b;
+    color: #cdd6f4;
+    padding: 2px;
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 4px 10px;
+    border-radius: 4px;
+}
+QMenuBar::item:selected {
+    background-color: #313244;
+}
+QMenu {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 5px 22px 5px 22px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background-color: #45475a;
+}
+QMenu::icon {
+    padding-left: 6px;
+}
+
+/* ---------- Dock Widget (terminal, left rail) ---------- */
+QDockWidget {
+    color: #cdd6f4;
+    titlebar-close-icon: none;
+    titlebar-normal-icon: none;
+}
+QDockWidget::title {
+    background-color: #11111b;
+    padding: 6px 8px;
+    border-bottom: 1px solid #313244;
+    text-align: left;
+    font-weight: bold;
+}
+QDockWidget > QWidget {
+    background-color: #1e1e2e;
+}
+QToolButton#dockHandle {
+    background-color: transparent;
+    border: none;
+    padding: 0 4px;
+    color: #6c7086;
+}
+QToolButton#dockHandle:hover { color: #cdd6f4; }
+
+QToolButton#dockPosition {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 2px;
+    color: #6c7086;
+}
+QToolButton#dockPosition:hover {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+QToolButton#dockPosition:checked {
+    background-color: #45475a;
+    color: #f9e2af;
+}
+
+/* ---------- Splitter ---------- */
+QSplitter::handle {
+    background-color: #313244;
+}
+QSplitter::handle:horizontal { width: 3px; }
+QSplitter::handle:vertical   { height: 3px; }
+
+/* ---------- Buttons ---------- */
+QPushButton {
+    background-color: #89b4fa;
+    color: #11111b;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-weight: bold;
+}
+QPushButton:hover { background-color: #b4befe; }
+QPushButton:pressed { background-color: #74c7ec; }
+QPushButton#danger { background-color: #f38ba8; color: #11111b; }
+QPushButton#danger:hover { background-color: #eba0ac; }
+QPushButton#flat {
+    background-color: transparent;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    padding: 4px 10px;
+    font-weight: normal;
+}
+QPushButton#flat:hover {
+    background-color: #313244;
+}
+
+/* ---------- Inputs ---------- */
+QLineEdit {
+    background-color: #11111b;
+    color: #a6e3a1;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 6px;
+    selection-background-color: #45475a;
+}
+QLineEdit:focus { border: 1px solid #89b4fa; }
+
+QTextEdit, QPlainTextEdit {
+    background-color: #11111b;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 4px;
+    selection-background-color: #45475a;
+}
+
+/* ---------- Tree (TOC + Find) ---------- */
+QTreeWidget, QTreeView {
+    background-color: #181825;
+    alternate-background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    selection-background-color: #45475a;
+    selection-color: #f9e2af;
+    outline: 0;
+}
+QTreeWidget::item, QTreeView::item {
+    padding: 4px 6px;
+    border-radius: 3px;
+}
+QTreeWidget::item:hover, QTreeView::item:hover {
+    background-color: #313244;
+}
+QHeaderView::section {
+    background-color: #313244;
+    color: #f9e2af;
+    padding: 4px;
+    border: none;
+}
+
+/* ---------- List (Thumbnails / Recent files) ---------- */
+QListWidget {
+    background-color: #181825;
+    border: 1px solid #313244;
+    color: #cdd6f4;
+    outline: 0;
+}
+QListWidget::item {
+    background-color: #1e1e2e;
+    border: 2px solid transparent;
+    border-radius: 4px;
+    padding: 4px;
+}
+QListWidget::item:selected {
+    background-color: #313244;
+    border: 2px solid #89b4fa;
+}
+QListWidget::item:hover {
+    background-color: #2a2a3e;
+}
+
+/* ---------- Tabs (Rail) ---------- */
+QTabWidget::pane {
+    border: none;
+}
+QTabBar::tab {
+    background-color: transparent;
+    color: #a6adc8;
+    padding: 6px 14px;
+    border-bottom: 2px solid transparent;
+}
+QTabBar::tab:selected {
+    color: #cdd6f4;
+    border-bottom: 2px solid #89b4fa;
+}
+QTabBar::tab:hover {
+    color: #cdd6f4;
+}
+
+/* Close (×) button on each tab. */
+QTabBar::close-button {
+    subcontrol-position: right;
+    image: none;
+    background-color: transparent;
+    border-radius: 8px;
+}
+QTabBar::close-button:hover {
+    background-color: #313244;
+}
+QTabBar::close-button:pressed {
+    background-color: #45475a;
+}
+
+/* ---------- Scrollbars ---------- */
+QScrollBar:vertical {
+    background: #181825;
+    width: 12px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #45475a;
+    min-height: 24px;
+    border-radius: 6px;
+}
+QScrollBar::handle:vertical:hover { background: #585b70; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+QScrollBar:horizontal {
+    background: #181825;
+    height: 12px;
+    margin: 0;
+}
+QScrollBar::handle:horizontal {
+    background: #45475a;
+    min-width: 24px;
+    border-radius: 6px;
+}
+QScrollBar::handle:horizontal:hover { background: #585b70; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+/* ---------- Status bar ---------- */
+QStatusBar {
+    background-color: #11111b;
+    color: #a6adc8;
+    border-top: 1px solid #313244;
+}
+QStatusBar QLabel#pageIndicator {
+    color: #89b4fa;
+    font-weight: bold;
+    padding: 0 12px;
+}
+QStatusBar QLabel#zoomIndicator {
+    color: #f9e2af;
+    padding: 0 12px;
+}
+QStatusBar QLabel#modeBadge {
+    color: #11111b;
+    background-color: #cba6f7;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: bold;
+}
+QStatusBar::item { border: none; }
+
+/* ---------- Labels ---------- */
+QLabel#statusLabel  { color: #a6e3a1; font-weight: bold; }
+QLabel#modeLabel    { color: #f9e2af; font-weight: bold; padding: 2px 8px; border-radius: 3px; background-color: #313244; }
+
+/* ---------- Swatch colors ---------- */
+QFrame#swatch {
+    border: 2px solid transparent;
+    border-radius: 4px;
+}
+QFrame#swatch[active="true"] {
+    border: 2px solid #cdd6f4;
+}
+QFrame#swatch[category="pen"]:hover { border: 2px solid #f9e2af; }
+QFrame#swatch[category="highlight"]:hover { border: 2px solid #89b4fa; }
+
+/* ---------- Find bar ---------- */
+QFrame#findBar {
+    background-color: #11111b;
+    border-bottom: 1px solid #313244;
+}
+QFrame#findBar QLabel {
+    color: #a6adc8;
+    padding: 0 6px;
+}
+QFrame#findBar QLineEdit {
+    background-color: #181825;
+    color: #a6e3a1;
+    border: 1px solid #313244;
+    max-height: 28px;
+}
+
+/* ---------- Tooltips ---------- */
+QToolTip {
+    background-color: #11111b;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    padding: 4px 6px;
+}

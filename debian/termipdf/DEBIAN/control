@@ -1,0 +1,28 @@
+Package: termipdf
+Version: 0.1.0-1
+Architecture: amd64
+Maintainer: Md. Shishir Kaysar Shuvon <mdshuvon1009@gmail.com>
+Installed-Size: 595
+Depends: python3-pyqt6 (>= 6.5), python3-fitz (>= 1.23), python3-qrcode (>= 7.4), python3-pil (>= 10), libxcb-cursor0, libxkbcommon0, libfontconfig1, libfreetype6, libdbus-1-3, libgl1, libegl1, libxcb-shape0, libxcb-render0, libxcb-image0, libxkbcommon-x11-0, libsm6, libice6, libxrandr2, libxinerama1, libxi6, libxext6, libcups2, libpango-1.0-0, libcairo2
+Recommends: libxcb-render-util0
+Section: graphics
+Priority: optional
+Homepage: https://github.com/shuv-on/TermiPDF
+Description: Modern PDF editor with an embedded terminal
+ TermiPDF is a PyQt6 desktop PDF editor with a built-in terminal for
+ batch operations.
+ .
+ Features:
+  * View PDFs (single-page or continuous-scroll), zoom, fit-to-window,
+    outline (TOC) sidebar, thumbnail rail.
+  * Annotate with freehand ink, multi-colour highlights, sticky notes,
+    shapes (rect, ellipse, arrow), and Unicode text insertion
+    (including Bangla).
+  * Edit pages: delete, rotate, swap, split, merge, reorder, extract,
+    and generate new PDFs from current pages.
+  * Tools: QR-share popups, page-level image-to-PDF conversion,
+    full-text search with auto-highlight, undo/redo, save.
+  * Themes: dark (Dracula/Nord) and light (Edge-like), auto-detected
+    from your OS preference, persisted across sessions.
+  * Embedded terminal docks at the bottom of the window and exposes
+    every feature as a typed command - type `help` to list them all.

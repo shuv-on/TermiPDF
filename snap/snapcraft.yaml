@@ -38,9 +38,12 @@ icon: snap/gui/termipdf.png
 apps:
   termipdf:
     command: usr/bin/termipdf-wrapper
-    extensions: [gnome]                # Adwaita theme + GTK file dialogs
     common-id: termipdf.desktop
     desktop: usr/share/applications/termipdf.desktop
+    environment:
+      # Qt platform plugin and font handling fixes
+      QT_QPA_PLATFORM: "xcb"
+      DISABLE_WAYLAND: "1"
     plugs:
       - home                            # read/write PDFs in $HOME
       - desktop                         # .desktop file + icon
@@ -52,10 +55,7 @@ apps:
 
 parts:
   # ------------------------------------------------------------------
-  # Stage the project's `src/` tree into the snap prime tree so that
-  # `python3 -m src.main` works at runtime. We use the `nil` plugin
-  # because TermiPDF is not a pip-installable Python package (no
-  # pyproject.toml / setup.py — it's a `src/` layout run directly).
+  # Stage the project's `src/` tree into the snap prime tree
   # ------------------------------------------------------------------
   termipdf:
     plugin: nil
@@ -63,44 +63,28 @@ parts:
     override-build: |
       set -eux
 
-      # Drop the source tree into dist-packages so the launcher can put
-      # it on PYTHONPATH. The `src/shared/utils/path_solver.py` file
-      # uses `Path(__file__).resolve().parents[3]` to find the project
-      # root and locate the QSS files — preserving this layout keeps
-      # dark/light theming working under the snap.
       mkdir -p "$CRAFT_PART_INSTALL/usr/lib/python3/dist-packages"
       cp -r src "$CRAFT_PART_INSTALL/usr/lib/python3/dist-packages/src"
 
-      # Install the launcher shell script (readable form kept in
-      # snap/local/launcher.sh so reviewers can see exactly what the
-      # wrapper does).
       install -D -m 0755 snap/local/launcher.sh \
         "$CRAFT_PART_INSTALL/usr/bin/termipdf-wrapper"
 
-      # Install the XDG desktop entry.
       install -D -m 0644 snap/gui/termipdf.desktop \
         "$CRAFT_PART_INSTALL/usr/share/applications/termipdf.desktop"
 
-      # Install the app icon. Snapcraft will pick this up via the
-      # `desktop:` field above.
       install -D -m 0644 snap/gui/termipdf.png \
         "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/256x256/apps/termipdf.png"
 
-      # Provide a VERSION marker so the launcher can print the running
-      # build on startup (helpful when users report bugs).
       mkdir -p "$CRAFT_PART_INSTALL/snap"
       cp snap/local/VERSION "$CRAFT_PART_INSTALL/snap/VERSION"
     override-prime: |
       set -eux
       craftctl default
-      # Make sure our launcher + desktop entry + icon made it through.
       test -x "$CRAFT_PRIME/usr/bin/termipdf-wrapper"
       test -f "$CRAFT_PRIME/usr/share/applications/termipdf.desktop"
 
   # ------------------------------------------------------------------
-  # Pull in Python + the four runtime deps (PyQt6, PyMuPDF, qrcode,
-  # Pillow) plus the system libs Qt6 needs to talk to X11/Wayland,
-  # render fonts, talk to the GPU, etc.
+  # Pull in Python + runtime deps and system libraries
   # ------------------------------------------------------------------
   python-deps:
     plugin: python
@@ -115,7 +99,7 @@ parts:
       - libffi-dev
       - libssl-dev
     stage-packages:
-      # Qt6 platform deps
+      # Qt6 platform & xcb deps
       - libxcb-cursor0
       - libxkbcommon0
       - libfontconfig1
@@ -138,6 +122,7 @@ parts:
       - libcups2
       - libpango-1.0-0
       - libcairo2
+      - libharfbuzz0b
       # Misc
       - libsqlite3-0
       - zlib1g
