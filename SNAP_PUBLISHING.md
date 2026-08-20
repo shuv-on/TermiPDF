@@ -309,6 +309,21 @@ Common causes:
 - The launcher has a path that doesn't exist inside the snap.
 - `PYTHONPATH` set wrong (must be `$SNAP/usr/lib/python3/dist-packages`).
 
+**Specifically for PyQt6 apps**, `libqxcb.so` transitively links against
+several `libxcb-*` libraries. If the launcher prints
+`Cannot load library .../libqxcb.so: libxcb-icccm.so.4: cannot open shared
+object file`, you're missing `libxcb-icccm4`. Get the full chain:
+
+```bash
+QT_DEBUG_PLUGINS=1 snap run termipdf 2>&1 | grep 'cannot open shared'
+```
+
+Every `libX.so.N` you see in that output needs a matching `stage-package`
+of the form `libX-N` (or just `libX` if N is empty). The full Qt6 xcb
+set on `core22` is: `libxcb-cursor0`, `libxcb-icccm4`, `libxcb-image0`,
+`libxcb-keysyms1`, `libxcb-render0`, `libxcb-render-util0`, `libxcb-shape0`,
+`libxkbcommon0`, `libxkbcommon-x11-0`.
+
 ### 6.2. **"Icon is a placeholder / icon is too small"**
 
 **Cause:** icon is a generic download icon, or is smaller than

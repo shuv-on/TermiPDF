@@ -112,6 +112,8 @@ parts:
       - libxcb-render-util0
       - libxcb-image0
       - libxcb-keysyms1
+      - libxcb-icccm4            # PyQt6 libqxcb.so depends on this (libxcb-icccm.so.4)
+      - libxcb-util1             # libxcb-util.so.1 — sibling of libxcb-icccm
       - libxkbcommon-x11-0
       - libsm6
       - libice6
